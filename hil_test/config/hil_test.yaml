@@ -1,0 +1,8 @@
+# CAN 设备与测试参数
+can:
+  interface: can0        # SocketCAN 接口
+  bitrate: 500000        # 波特率
+
+test:
+  heartbeat_id: 0x301    # 心跳帧 ID
+  heartbeat_period_ms: 100  # 心跳周期
