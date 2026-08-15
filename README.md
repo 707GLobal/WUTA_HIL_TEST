@@ -1,3 +1,6 @@
+# WUTA_HIL_TEST
+** 在FSD仓库中的hil_test分支开发 **
+
 ## Git 子模块说明
 
 `WUTA-FSD` 是通过 git submodule 引入的独立仓库（`https://github.com/GaoMingHa0/WUTA-FSD.git`），
