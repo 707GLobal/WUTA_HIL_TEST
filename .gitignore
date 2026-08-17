@@ -1,0 +1,18 @@
+# Cache files (all languages / tools)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.eggs/
+*.egg-info/
+.cache/
+.tmp/
+*.tmp
+
+# Build artifacts (colcon / catkin)
+build/
+install/
+log/
+logs/
+devel/
