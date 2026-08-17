@@ -1,3 +1,9 @@
 [submodule "WUTA-FSD"]
 	path = WUTA-FSD
 	url = https://github.com/GaoMingHa0/WUTA-FSD.git
+	branch = hil_test
+
+[submodule "humble-chcnav-cgi_ros2pkg"]
+	path = humble-chcnav-cgi_ros2pkg
+	url = https://github.com/707GLobal/humble-chcnav-cgi_ros2pkg.git
+	
