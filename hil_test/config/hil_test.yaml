@@ -1,8 +1,16 @@
 # CAN 设备与测试参数
 can:
-  interface: can0        # SocketCAN 接口
+  interface: can0        # SocketCAN 接口（真实 USB-CAN 接入后按实际名称修改，如 can0/can1/...）
   bitrate: 500000        # 波特率
+  sim_interfaces:        # 仿真接口列表：匹配则自动起 vcu_sim / 允许 0x501 注入
+    - vcan0
 
 test:
-  heartbeat_id: 0x301    # 心跳帧 ID
-  heartbeat_period_ms: 100  # 心跳周期
+  frames:
+    - id: 0x210          # 工控机→VCU 心跳（10Hz 保活）
+      period_ms: 100
+    - id: 0x501          # VCU→工控机 心跳（10Hz）
+      period_ms: 100
+  period_tolerance_ratio: 0.2  # 心跳周期容差（±20%）
+  watchdog_timeout_ms: 1000    # VCU 失联看门狗阈值（L2 看门狗用例，与 FSD 约定一致）
+  ros_timeout_sec: 5.0         # ROS 话题等待/断言超时

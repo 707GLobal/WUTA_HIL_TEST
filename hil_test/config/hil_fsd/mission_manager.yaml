@@ -1,0 +1,12 @@
+# HIL 台架专用参数覆盖（mission_manager）
+# 车辆架起、传感器仅保在线：关闭全部传感器自检，避免华测未接导致自检失败锁死 EMERGENCY。
+# 用法（在默认 params 之后加载本文件，同名参数后者生效）：
+#   ros2 run mission_manager mission_manager_node --ros-args \
+#     --params-file <ws>/src/system/mission_manager/config/mission_manager.yaml \
+#     --params-file <hil_test>/config/hil_fsd/mission_manager.yaml
+
+mission_manager_node:
+  ros__parameters:
+    check_lidar: false
+    check_imu: false
+    check_camera: false

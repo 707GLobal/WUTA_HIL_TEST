@@ -1,2 +1,56 @@
-# 协议配置（协议敲定后填充）
-# 描述报文 ID / 信号位 / 字节序 / 定标 / 周期
+# 26赛季 VCU-工控机 CAN 协议
+# 镜像自: WUTA-FSD/ros2_ws/src/system/can_interface/docs_for_can/26赛季 VCU - 工控机 CAN通信协议规划.md
+# hil_test 编解码与断言统一入口；协议变更只改本文件
+
+# 工控机 → VCU（发送）
+tx_210:
+  id: 0x210
+  period_ms: 100          # 10Hz 保活
+  dlc: 8
+  max_steer_deg: 25.0     # Signal2 满量程转向角（与 can_interface max_steer_deg 一致）
+  signals:
+    longitudinal:         # Signal1 纵向控制（<32767 制动、>32767 驱动）Byte1-2
+      bytes: [0, 1]
+      little_endian: true
+      center: 32767
+      min: 10
+      max: 65525
+    lateral:              # Signal2 横向控制（10=左、65525=右）Byte3-4
+      bytes: [2, 3]
+      little_endian: true
+      center: 32767
+      min: 10
+      max: 65525
+    online:               # Signal3 工控机上线 Byte5
+      byte: 4
+    finished:             # Signal4 任务已完成 Byte6
+      byte: 5
+
+# VCU → 工控机（接收）
+rx_501:
+  id: 0x501
+  period_ms: 100          # 10Hz
+  dlc: 8
+  state_byte: 0           # Byte1: VCU 状态
+  mode_byte: 1            # Byte2: 测试模式
+  states:
+    0: SILENT
+    1: MANNED_WAIT_HV
+    2: MANNED_WAIT_CTRL
+    3: MANNED_WAIT_START
+    4: MANNED_DRIVING
+    5: MANNED_ERROR
+    6: UNMANNED_WAIT_HV
+    7: UNMANNED_WAIT_CTRL
+    8: UNMANNED_COOLING
+    9: UNMANNED_STANDBY
+    10: UNMANNED_DRIVING   # AS_DRIVING  → /system/start_command=true
+    11: UNMANNED_FINISHED  # AS_FINISHED → 仅日志
+    12: UNMANNED_EMERGENCY # AS_EMERGENCY → /system/emergency=true
+  mode_topic_map:         # Byte2 → mission_mode_cmd 字符串；null = 忽略
+    1: null               # 操控性测试（有人驾驶，与无人算法无关）
+    2: acceleration
+    3: trackdrive
+    4: skidpad
+    5: ebs_test
+    6: inspection
