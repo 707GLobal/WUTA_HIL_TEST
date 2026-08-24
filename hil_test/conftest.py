@@ -1,11 +1,12 @@
 """pytest 公共配置：路径、fixtures、markers.
 
 分层 marker：
-  sim      - L0.5 仿真预跑（vcan 模拟 VCU）
-  link     - L0  链路自检
-  protocol - L1  协议一致性
-  safety   - L2  安全与状态联动
-  motor    - L3  电机闭环（slow）
+  sim      - L0 仿真预跑（vcan 模拟 VCU）
+  unit     - L0 协议编解码单测（无需硬件）
+  link     - L1 链路自检（需 can_interface）
+  protocol - L1 协议一致性集成（需 can_interface）
+  safety   - L2 安全与状态联动
+  motor    - L3 电机闭环（slow）
   integration - 依赖 can_interface/FSD 运行，需工控机环境
 """
 
@@ -58,7 +59,7 @@ def _if_up(name):
 
 def pytest_configure(config):
     """注册分层 markers."""
-    for marker in ('sim', 'link', 'protocol', 'safety', 'motor', 'integration', 'slow'):
+    for marker in ('sim', 'unit', 'link', 'protocol', 'safety', 'motor', 'integration', 'slow'):
         config.addinivalue_line('markers', marker)
 
 
@@ -102,7 +103,7 @@ def bus_monitor(interface, tmp_path):
 
 @pytest.fixture
 def vcu_sim(can_ready):
-    """L0.5 仿真 VCU（集成用例用）."""
+    """L0 仿真 VCU（集成用例用）."""
     from hil_test.vcu_sim import VcuSim
     sim = VcuSim(can_ready, _config_path('protocol.yaml'))
     if not sim.start():

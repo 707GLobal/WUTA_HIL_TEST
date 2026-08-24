@@ -79,31 +79,34 @@ FSD 侧配套（HIL 专用配置，默认配置不变）：
 
 ## 3. 分层测试框架（由浅入深）
 
-每层独立可跑，前一层通过后再进入下一层。L0.5 为纯仿真预跑，不需要真实 VCU。
+每层独立可跑，前一层通过后再进入下一层。L0 为纯仿真验证，不需要 FSD 代码与真实 VCU。
 
-### L0.5 仿真预跑（开发机 vcan，新增）
+### L0 纯仿真验证（开发机 vcan）
 
-目的：协议与状态联动先用软件模拟跑通，避免每次调试都接真实 VCU。
+目的：不依赖 FSD 代码，协议编解码与状态联动先用软件模拟跑通，避免每次调试都接真实 VCU。
 
 | 检查项     | 方法                                               | 通过标准                                                 |
 | ------- | ------------------------------------------------ | ---------------------------------------------------- |
-| vcan 链路 | `ip link add vcan0 type vcan` + up               | 接口 up，can\_interface 可打开                             |
+| 协议编解码单测 | protocol_loader 单测（定标/字节序/钳位/模式映射）              | 与 protocol.yaml 配置一致                                 |
+| vcan 链路 | `ip link add vcan0 type vcan` + up               | 接口 up，can_interface 可打开                             |
 | VCU 模拟  | `vcu_sim.py` 周期发 0x501（10Hz），状态可脚本切换             | 0x501 稳定到达，周期 100ms ± 容忍                             |
-| 协议编解码   | hil\_test 注入 / 解码 0x210                          | 与 protocol.yaml 配置一致                                 |
-| 状态联动    | 脚本切状态 10 / 12 / 模式 Byte2                         | start\_command / emergency / mission\_mode\_cmd 话题正确 |
-| 保活防丢    | 乱序启动 mission\_manager / controller 后保持状态 10 / 12 | 1s 内收到对应命令（GO / EMERGENCY 1Hz 保活）                    |
+| 状态联动    | 脚本切状态 10 / 12 / 模式 Byte2                         | start_command / emergency / mission_mode_cmd 话题正确 |
 
-### L0 链路自检
+> L0 仅限仿真接口（`sim_interfaces`），对真实接口运行会报错退出（防模拟帧污染真实 VCU）。
+
+### L1 链路自检 + 协议一致性（需 FSD）
+
+链路自检：
 
 | 检查项        | 方法                                            | 通过标准                                          |
 | ---------- | --------------------------------------------- | --------------------------------------------- |
 | CAN 接口     | `ip link set can0 up type can bitrate 500000` | 接口 up，无报错                                     |
-| 节点上线       | 启动 can\_interface                             | 日志显示 device opened、Tx 0x210 / Rx 0x501 active |
+| 节点上线       | 启动 can_interface                             | 日志显示 device opened、Tx 0x210 / Rx 0x501 active |
 | 工控机→VCU 心跳 | 监听 0x210                                      | 每 100ms 稳定一帧，DLC=8                            |
 | VCU→工控机心跳  | 监听 0x501                                      | 每 100ms 稳定一帧，DLC=8，Byte1/Byte2 有效             |
 | fail-safe  | 断开 VCU / 接口 down 后重启节点                        | 日志告警且 0x210 无任何非零控制量（Signal1/2=32767）         |
 
-### L1 协议一致性（配置驱动）
+协议一致性（配置驱动）：
 
 - 协议不写死在测试代码里，用 `protocol.yaml` 描述报文 ID / 字节序 / 信号位 / 定标 / 周期；
 - **工控机 → VCU 方向（0x210）**：通过 ROS 注入已知输入（`speed`、`angle`、mission state、devices\_inspection），抓 CAN 帧解码，断言与配置期望一致；
@@ -159,16 +162,16 @@ hil_test/
 │   ├── bus_monitor.py       # 被动监听 CAN 帧 + 日志落盘 + 周期/ID 统计
 │   ├── protocol_loader.py   # 解析 protocol.yaml，编解码统一入口
 │   ├── ros_injector.py      # 注入控制/状态/车速 + 台架代发（pose/ready/waypoints）
-│   ├── vcu_sim.py           # L0.5：vcan 模拟 VCU（周期发 0x501，状态可脚本切换；解析 0x210）
+│   ├── vcu_sim.py           # L0：vcan 模拟 VCU（周期发 0x501，状态可脚本切换；解析 0x210）
 │   ├── fault_injector.py    # 可选：CAN 故障注入（急停帧 / 停发），需独立测试通道
 │   └── report.py            # 测试结果汇总，生成 Markdown 报告
 ├── test/
-│   ├── test_protocol.py     # L0/L0.5/L1 用例（pytest）
+│   ├── test_protocol.py     # L0/L1 用例（pytest）
 │   ├── test_safety.py       # L2 安全与状态联动（pytest）
 │   └── test_motor_hil.py    # L3 电机闭环（pytest，标记 slow）
 ├── scripts/
 │   ├── hil_test.sh          # 一键脚本（编译+节点+测试+清理）
-│   └── run_hil.py           # 分层执行入口：--level L0.5/L0..L3
+│   └── run_hil.py           # 分层执行入口：--level L0..L3
 ```
 （用法与验收见工程根目录 README.md）
 
@@ -178,7 +181,7 @@ hil_test/
 
 - `bus_monitor` 在 `can0` 上以只读套接字被动监听，不占用 can\_interface 的收发；
 - `ros_injector` 驱动 FSD 输入（等价于实车场景的决策层输入）；**HIL 台架下统一代发位姿 / 车速 / 路径 / 就绪信号**（§2.3），FSD 传感器节点不参与；
-- `vcu_sim` 仅用于 L0.5 仿真预跑（vcan0），真实 VCU 接入后不再启用；
+- `vcu_sim` 仅用于 L0 仿真预跑（vcan0），真实 VCU 接入后不再启用；
 - VCU 侧真实信号（Go / 急停 / 任务）不走软件注入，由**人工操作**配合用例流程执行；
 - `fault_injector` 仅用于故障注入场景，默认关闭，且建议用独立测试通道避免污染正常测试。
 
@@ -187,7 +190,7 @@ hil_test/
 | 里程碑 | 内容                                                                                                        | 环境                       | 验收标准                                   |
 | --- | --------------------------------------------------------------------------------------------------------- | ------------------------ | -------------------------------------- |
 | M1  | 搭建 `hil_test` 框架：填充 protocol.yaml + bus\_monitor + protocol\_loader + ros\_injector + vcu\_sim + run\_hil | 开发机 vcan0                | vcan0 抓帧正常，编解码配置可解析，vcu\_sim 能模拟 0x501 |
-| M2  | L0.5 + L0 + L1 用例跑通                                                                                       | 开发机 vcan0 / 工控机 + 真实 VCU | 仿真预跑与链路用例绿；协议用例在配置驱动下绿                 |
+| M2  | L0 + L1 用例跑通                                                                                        | 开发机 vcan0 / 工控机 + 真实 VCU | 仿真预跑与链路用例绿；协议用例在配置驱动下绿                 |
 | M3  | L2 安全用例（含人工操作 Go / 急停）                                                                                    | 工控机 + 真实 VCU             | 门控 / 急停 / 保活防丢通过，且仅零输出；看门狗待开发项完成后并入    |
 | M4  | L3 电机闭环                                                                                                   | 工控机 + VCU + 电机台架         | 台架通电后闭环指标达标，输出报告                       |
 

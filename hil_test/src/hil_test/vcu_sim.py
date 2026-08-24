@@ -1,4 +1,4 @@
-"""L0.5 仿真预跑：vcan 模拟 VCU（周期发 0x501，状态可脚本切换；解析 0x210）."""
+"""L0 仿真预跑：vcan 模拟 VCU（周期发 0x501，状态可脚本切换；解析 0x210）."""
 
 import sys
 import threading

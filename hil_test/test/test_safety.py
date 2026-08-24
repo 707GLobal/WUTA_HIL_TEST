@@ -10,6 +10,22 @@ import time
 import pytest
 
 
+def _human_wait(fsd_ready, topic, expected, timeout, hint):
+    """等待话题值；等待期间周期性打印人工操作提示与剩余时间."""
+    deadline = time.time() + timeout
+    print(f'\n[L2] 等待操作: {hint}（超时 {timeout:.0f}s）')
+    last_report = time.time()
+    while time.time() < deadline:
+        fsd_ready.spin_once()
+        if fsd_ready.latest(topic) == expected:
+            return True
+        if time.time() - last_report >= 5.0:
+            print(f'[L2]   等待中… {hint}（剩余 {deadline - time.time():.0f}s）')
+            last_report = time.time()
+        time.sleep(0.2)
+    return False
+
+
 @pytest.mark.safety
 @pytest.mark.integration
 def test_start_gate_zero_output(fsd_ready, bus_monitor, protocol, vcu):
@@ -39,7 +55,8 @@ def test_go_release(fsd_ready, vcu):
     if vcu is not None:
         vcu.request_go(True)
     # 真实 VCU：人工操作 RES 给 Go；仿真：vcu_sim 自动进入 10
-    assert fsd_ready.wait_for('/system/start_command', True, timeout=30.0), \
+    assert _human_wait(fsd_ready, '/system/start_command', True, 30.0,
+                       'RES 给 Go（VCU 进入驾驶态 10）'), \
         '未收到 start_command=true（真实 VCU 请操作 RES 给 Go）'
     assert fsd_ready.wait_for('/system/mission_state', 3, timeout=10.0), \
         '收到 Go 后未进入 EXPLORE'
@@ -51,7 +68,8 @@ def test_emergency_priority(fsd_ready, bus_monitor, protocol, vcu):
     """急停优先级：VCU 状态 12 → /system/emergency=true + 总线零控制."""
     if vcu is not None:
         vcu.set_emergency(True)
-    assert fsd_ready.wait_for('/system/emergency', True, timeout=30.0), \
+    assert _human_wait(fsd_ready, '/system/emergency', True, 30.0,
+                       '触发 RES 急停（VCU 状态 12）'), \
         '未收到 emergency=true（真实 VCU 请触发 RES 急停）'
     # controller 急停后发布全零（若 controller 运行），至多等 5s
     deadline = time.time() + 5.0
@@ -79,5 +97,6 @@ def test_inspection_flow(fsd_ready, vcu):
     """车检流程：测试模式=6 → /system/mission_mode_cmd="inspection"."""
     if vcu is not None:
         vcu.set_mode(6)
-    assert fsd_ready.wait_for('/system/mission_mode_cmd', 'inspection', timeout=30.0), \
+    assert _human_wait(fsd_ready, '/system/mission_mode_cmd', 'inspection', 30.0,
+                       '用 AMI 选择车检模式（6）'), \
         '未收到 mission_mode_cmd=inspection（真实 VCU 请用 AMI 选择车检）'

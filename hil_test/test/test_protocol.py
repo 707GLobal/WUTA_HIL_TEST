@@ -1,9 +1,10 @@
-"""L0 链路自检 + L0.5 仿真预跑 + L1 协议一致性（pytest）.
+"""L0 纯仿真验证 + L1 链路自检/协议一致性（pytest）.
 
 marker:
-  link     - L0：接口 up / 心跳 / fail-safe
-  sim      - L0.5：vcan 模拟 VCU（纯 CAN，无需 ROS）
-  protocol - L1：编解码单测（无需硬件）+ ROS 集成用例（需 can_interface 运行）
+  sim      - L0：vcan 模拟 VCU（纯 CAN，无需 ROS）
+  unit     - L0：协议编解码单测（无需硬件）
+  link     - L1：接口 up / 心跳 / fail-safe（需 can_interface 运行）
+  protocol - L1：ROS 集成，0x501→话题映射 / 0x210 定标透传（需 can_interface 运行）
 """
 
 import time
@@ -30,16 +31,16 @@ def _inject_501(interface, protocol, state, mode=None, count=20):
         fi.close()
 
 
-# ================= L1 纯协议单测（无需硬件） =================
+# ================= L0 纯协议单测（无需硬件） =================
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_scale_center(protocol):
     """定标中心点：0 控制 → 32767."""
     data = protocol.encode_210(0.0, 0.0, False, False)
     assert data[:2] == ZERO_LE and data[2:4] == ZERO_LE
 
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_little_endian(protocol):
     """字节序：小端，Byte1=低字节."""
     # 纵向满驱动 scale(1)=65525=0xFFF5 → [F5 FF]；横向左满 scale(-1)=10 → [0A 00]
@@ -48,7 +49,7 @@ def test_little_endian(protocol):
     assert data[2:4] == bytes([0x0A, 0x00])
 
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_clamp_out_of_range(protocol):
     """越界钳位：[10, 65525]."""
     data = protocol.encode_210(5.0, 0.0, False, False)
@@ -57,7 +58,7 @@ def test_clamp_out_of_range(protocol):
     assert data[:2] == bytes([0x0A, 0x00])
 
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_mid_scale(protocol):
     """中值定标：与 C++ scaleControl 一致."""
     from hil_test.protocol_loader import scale_control
@@ -67,7 +68,7 @@ def test_mid_scale(protocol):
     assert protocol.decode_210(data)['lateral'] == scale_control(0.5)
 
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_online_finished_bytes(protocol):
     """上线/完成信号位."""
     data = protocol.encode_210(0.0, 0.0, True, True)
@@ -76,14 +77,14 @@ def test_online_finished_bytes(protocol):
     assert data[4] == 0 and data[5] == 0
 
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_decode_501(protocol):
     """0x501 解析：Byte1 状态、Byte2 模式."""
     state, mode = protocol.decode_501(bytes([12, 3, 0, 0, 0, 0, 0, 0]))
     assert (state, mode) == (12, 3)
 
 
-@pytest.mark.protocol
+@pytest.mark.unit
 def test_mode_topic_map(protocol):
     """测试模式 → mission_mode_cmd 映射."""
     assert protocol.mode_topic(2) == 'acceleration'
@@ -95,7 +96,7 @@ def test_mode_topic_map(protocol):
     assert protocol.mode_topic(99) is None  # 未知模式
 
 
-# ================= L0.5 仿真预跑（vcan + vcu_sim） =================
+# ================= L0 仿真预跑（vcan + vcu_sim） =================
 
 @pytest.mark.sim
 def test_sim_501_heartbeat(vcu_sim, bus_monitor, protocol):
@@ -145,7 +146,7 @@ def _wait_until(predicate, timeout):
     return False
 
 
-# ================= L0 链路自检（需 can_interface 运行） =================
+# ================= L1 链路自检（需 can_interface 运行） =================
 
 @pytest.mark.link
 def test_link_can_interface_up(can_ready):
