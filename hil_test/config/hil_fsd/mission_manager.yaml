@@ -5,7 +5,7 @@
 #     --params-file <ws>/src/system/mission_manager/config/mission_manager.yaml \
 #     --params-file <hil_test>/config/hil_fsd/mission_manager.yaml
 
-mission_manager_node:
+mission_manager:
   ros__parameters:
     check_lidar: false
     check_imu: false
