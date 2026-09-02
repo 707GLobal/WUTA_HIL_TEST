@@ -59,6 +59,17 @@ cd hil_test
 ```
 
 > `-l all`：仿真接口（vcan0）下全自动连跑 L0→L1→L2，任一层失败即停并生成 `summary.md`；真实接口下只跑 L1，L2 需人工配合（RES/AMI），请单独运行 `-l L2`。
+>
+> `-k` 保留的 FSD 节点在脚本退出后仍驻留，排查完请手动停止：`ps aux | grep "ros2 run"` 找到进程后 kill（或直接关闭对应终端）。
+
+### 环境变量
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `PROJECT_NAME` | `WUTA_HIL` | 报告文件名（`<日期>-<时间>-<项目>.md`） |
+| `HIL_BENCH` | 未设置 | `1` 启用 L3 台架模式（等价于 `-n`） |
+| `HIL_INTERFACE` | 读 `hil_test.yaml` | CAN 接口名（脚本自动设置；直接跑 pytest 时手动设） |
+| `HIL_CONFIG` | 无 | 配置目录（脚本自动设置；直接跑 pytest 时手动设） |
 
 各链路自动启动的节点：
 
@@ -80,9 +91,9 @@ logs/
     ├── L0/
     │   ├── 20260824-143000-WUTA_HIL.md  # 详细报告（命名：日期-时间-项目）
     │   ├── junit.xml                    # pytest 原始结果（机器可读）
-    │   ├── pytest_L0.log                # pytest 完整输出（--tb=long 含回溯）
-    │   └── can_interface_node.log       # 该层节点日志
-    ├── L1/   ├── L2/   └── L3/          # 结构同 L0
+    │   └── pytest_L0.log                # pytest 完整输出（--tb=long 含回溯）
+    ├── L1/   ├── L2/   └── L3/          # 结构同 L0；有节点的层另含节点日志
+    │   └── can_interface_node.log       # 该层节点日志（L1 另有 vcu_sim.log）
 ```
 
 - 报告命名：`<日期>-<时间>-<项目>.md`，如 `20260824-143000-WUTA_HIL.md`（项目名默认 `WUTA_HIL`，可用环境变量 `PROJECT_NAME` 覆盖）；
@@ -116,6 +127,8 @@ logs/
 
 查看方式：IDE 直接打开，或 `cat hil_test/logs/latest/L0/*.md`。
 
+**排查定位**：用例失败先看该层详细报告（含完整 traceback）定位断言位置；节点行为问题看节点日志 `logs/latest/<层级>/can_interface_node.log`（L1 另有 `vcu_sim.log`）。
+
 ## 分步测试流程（L0 → L3）
 
 > 每步都是一条 `./scripts/hil_test.sh -l <层级> -i <接口>` 命令：脚本自动完成「编译 FSD（可 `--no-build` 跳过）→ 准备接口 → 启动所需节点 → 跑该层全部用例 → 输出 `summary.md`」
@@ -123,11 +136,27 @@ logs/
 ### 步骤 0 · 一次性准备
 
 ```bash
-sudo apt install python3-yaml python3-pytest   # 依赖（一般已装）
+sudo apt install python3-yaml python3-pytest python3-colcon-common-extensions
+sudo apt install can-utils        # 调试可选：candump / cansend
 cd hil_test
 ```
 
-脚本首次运行会自动 `colcon build` 编译 FSD（较慢），之后可加 `--no-build` 跳过。创建 vcan0 需要 sudo（脚本自动执行，会提示密码）。
+CAN 内核模块（USB-CAN 适配器依赖 `can_raw`，仿真依赖 `vcan`；一般随内核自动加载，精简内核需手动加载）：
+
+```bash
+sudo modprobe can can_raw vcan
+```
+
+脚本首次运行会自动 `colcon build` 编译 FSD（较慢），之后可加 `--no-build` 跳过。**`--no-build` 仅当 FSD 已编译过（`WUTA-FSD/ros2_ws/install/setup.bash` 存在）时可用**，首次运行或 FSD 代码更新后请不带该选项跑一次。创建 vcan0 需要 sudo（脚本自动执行，会提示密码；非交互终端下请先 `sudo -v`）。
+
+环境自检（任一步失败先解决对应依赖，再进入下一步）：
+
+```bash
+ros2 --version                                     # ROS2 已安装
+python3 -c "import yaml, pytest"                   # 测试依赖
+git submodule status                               # WUTA-FSD 已拉取（状态列无 "-" 前缀）
+ip link show vcan0 2>/dev/null || echo "vcan0 未创建（脚本会自动创建）"
+```
 
 > **CAN 设备预留**：真实 USB-CAN 适配器与端口（接口名）未定前，默认 `can0`。接入后只需改 `hil_test/config/hil_test.yaml` 的 `can.interface`（如 `can1`），脚本/测试自动适配；`can.sim_interfaces` 列表内的接口视为仿真（自动起 vcu\_sim、允许 0x501 注入），其余视为真实接口。
 
@@ -259,7 +288,7 @@ python -m pytest test/test_safety.py -m safety -q        # L2（需节点 + 真�
 - Python 3.10+、pytest、PyYAML（系统包即可）
 - **CAN 层用纯 stdlib SocketCAN**（无需 python-can）
 - ROS 集成用例需 ROS2（humble）+ FSD workspace（脚本自动 source）
-- 调试可选：can-utils（candump / cansend）
+- 调试可选：can-utils（candump / cansend）；CAN 内核模块（can / can_raw / vcan）
 
 ## HIL 台架模式（车辆架起，传感器仅保在线）
 
@@ -289,6 +318,19 @@ python -m pytest test/test_safety.py -m safety -q        # L2（需节点 + 真�
 | `protocol` | L1 | can\_interface + 仿真接口（注入用例）                  | 接口未 up / can\_interface 未运行 / 真实接口注入用例 |
 | `safety`   | L2 | can\_interface + mission\_manager/controller | can\_interface 未运行；看门狗用例恒跳过            |
 | `motor`    | L3 | 台架 + can\_interface + controller             | `HIL_BENCH` 未设 / can\_interface 未运行    |
+
+## 常见问题速查
+
+脚本级 / 环境级报错按「症状 → 原因 → 处理」集中排查（用例级失败见各层「失败排查」与详细报告 traceback）：
+
+| 症状 | 原因 | 处理 |
+| --- | --- | --- |
+| 脚本报 `cd: WUTA-FSD/ros2_ws: 没有那个文件或目录` | WUTA-FSD 子模块未初始化 | `git submodule update --init --recursive` |
+| 创建 vcan0 报 `Operation not permitted` | 无 CAP_NET_ADMIN（容器 / 权限受限） | 换真实开发机或提权运行 |
+| 创建 vcan0 提示 `sudo: a terminal is required` | 非交互终端下 sudo 无法读密码 | 先 `sudo -v` 预授权，或换交互终端 |
+| 集成用例超时（话题收不到） | ROS_DOMAIN_ID 不一致 / 节点未启动 / workspace 未 source | 两端设置相同 `ROS_DOMAIN_ID`；`ros2 node list` 确认节点在线 |
+| 真实接口 0x501 心跳超时 | VCU 未上电 / CAN 波特率不匹配 / USB-CAN 未识别 | `candump can0` 确认能抓帧；`sudo ip link set can0 up type can bitrate 500000`；`dmesg \| tail` 查适配器 |
+| 提示 `can_interface 未运行` | FSD 未编译 / 未 source workspace | 看 `logs/latest/<层级>/can_interface_node.log`，确认执行过编译 |
 
 ## 安全约定
 

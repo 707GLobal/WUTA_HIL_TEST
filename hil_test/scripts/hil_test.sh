@@ -11,7 +11,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HIL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-FSD_WS="$HIL_ROOT/WUTA-FSD/ros2_ws"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+FSD_WS="$REPO_ROOT/WUTA-FSD/ros2_ws"
 HIL_CFG="$HIL_ROOT/config"
 LOG_DIR="$HIL_ROOT/logs"
 
@@ -83,12 +84,15 @@ if ! valid_level "$LEVEL"; then
 fi
 
 # ---- 环境 ----
+# colcon 生成的 setup.bash 引用未定义的 COLCON_TRACE，需在 set -u 下临时放开
+set +u
 if ! command -v ros2 >/dev/null 2>&1; then
   source /opt/ros/humble/setup.bash
 fi
 if [ -f "$FSD_WS/install/setup.bash" ]; then
   source "$FSD_WS/install/setup.bash"  # --no-build 时也保证 FSD 消息/节点可用
 fi
+set -u
 # ---- 日志目录：按批次时间戳归档，logs/latest 指向最新一批 ----
 mkdir -p "$HIL_ROOT/logs"
 LOG_DIR="$HIL_ROOT/logs/$(date +%Y%m%d_%H%M%S)"
@@ -107,7 +111,9 @@ if [ "$DO_BUILD" -eq 1 ]; then
   else
     colcon build
   fi
+  set +u
   source "$FSD_WS/install/setup.bash"
+  set -u
 fi
 
 # ---- 接口准备 ----
