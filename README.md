@@ -54,6 +54,7 @@ cd hil_test
 ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线：L0→L1→L2 连跑（失败即停）
 ./scripts/hil_test.sh -l L3 -i can0 -n    # L3 台架
 ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
+./scripts/hil_test.sh -c -l L1            # 编译前清理 FSD 缓存（build/install/log），全量重编
 ./scripts/hil_test.sh -p "can_interface mission_manager controller" -l L2  # 只编指定包
 ./scripts/hil_test.sh -l L1 -k            # 测试后保留节点（调试）
 ```

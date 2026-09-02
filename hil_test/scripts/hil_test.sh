@@ -21,6 +21,7 @@ INTERFACE="vcan0"
 MODE=""                  # sim=仿真(vcan) | real=真实(USB-CAN)，缺省按接口名推断
 DO_BUILD=1
 BUILD_PKGS=""
+CLEAN_BUILD=0
 KEEP_NODES=0
 BENCH=0
 
@@ -33,6 +34,7 @@ usage() {
   -m, --mode <sim|real>            sim=仿真(vcan) / real=真实接口（缺省按接口名自动推断）
   -b, --build                       编译 FSD（默认开启）
       --no-build                    跳过编译
+  -c, --clean                       编译前清理 FSD 缓存（build/install/log，全量重编）
   -p, --build-packages <pkgs>       只编译指定包（空格分隔；缺省全量）
   -k, --keep-nodes                  测试后保留 FSD 节点（便于调试）
   -n, --bench                       L3 台架模式（HIL_BENCH=1）
@@ -48,6 +50,7 @@ while [ $# -gt 0 ]; do
     -m|--mode) MODE="$2"; shift 2 ;;
     -b|--build) DO_BUILD=1; shift ;;
     --no-build) DO_BUILD=0; shift ;;
+    -c|--clean) CLEAN_BUILD=1; shift ;;
     -p|--build-packages) BUILD_PKGS="$2"; shift 2 ;;
     -k|--keep-nodes) KEEP_NODES=1; shift ;;
     -n|--bench) BENCH=1; shift ;;
@@ -103,9 +106,17 @@ PROJECT_NAME="${PROJECT_NAME:-WUTA_HIL}"   # 报告文件名用：日期-时间-
 export HIL_PROJECT="$PROJECT_NAME"
 
 # ---- 编译 FSD ----
+if [ "$CLEAN_BUILD" -eq 1 ] && [ "$DO_BUILD" -eq 0 ]; then
+  echo "!! -c/--clean 需配合编译，不能与 --no-build 同时使用" >&2
+  exit 1
+fi
 if [ "$DO_BUILD" -eq 1 ]; then
   echo "==> 编译 FSD ($FSD_WS)"
   cd "$FSD_WS"
+  if [ "$CLEAN_BUILD" -eq 1 ]; then
+    echo "==> 清理 FSD 编译缓存（build/install/log）"
+    rm -rf "$FSD_WS/build" "$FSD_WS/install" "$FSD_WS/log"
+  fi
   if [ -n "$BUILD_PKGS" ]; then
     colcon build --packages-select $BUILD_PKGS
   else
@@ -128,9 +139,15 @@ prepare_interface() {
       exit 1
     fi
   fi
-  if ! ip link show "$INTERFACE" | grep -q " UP "; then
-    echo "!! $INTERFACE 未 up（ip link set $INTERFACE up）" >&2
-    exit 1
+  # 按 flags 中的独立词 UP 判断（vcan 状态列显示 UNKNOWN 而非 UP，不能用 " UP " 匹配）
+  if ! ip link show "$INTERFACE" | grep -qw "UP"; then
+    if [ "$MODE" = "sim" ]; then
+      echo "==> 启动 $INTERFACE（需 sudo）"
+      sudo ip link set "$INTERFACE" up
+    else
+      echo "!! $INTERFACE 未 up（ip link set $INTERFACE up）" >&2
+      exit 1
+    fi
   fi
   echo "==> 接口 $INTERFACE 就绪（mode=$MODE）"
 }
