@@ -23,7 +23,9 @@ class VcuSim:
     STATE_DRIVING = 10
     STATE_FINISHED = 11
     STATE_EMERGENCY = 12
-    DEFAULT_MODE = 3  # 高速循迹
+    # 默认模式 1（操控性/未选任务）：can_interface 视为忽略、不发布 mission_mode_cmd，
+    # 避免其持续注入干扰 L1 模式映射用例的"仅变化时发布"断言
+    DEFAULT_MODE = 1
 
     def __init__(self, interface, protocol_path, period_ms=100):
         self._sock = CanSocket(interface, recv_timeout=0.01)

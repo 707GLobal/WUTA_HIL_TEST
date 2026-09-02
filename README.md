@@ -23,8 +23,7 @@ WUTA_HIL_TEST/
 │   │   ├── bus_monitor.py       # 被动监听 CAN + 周期统计 + 日志落盘
 │   │   ├── ros_injector.py      # rclpy 注入/断言 + 台架代发（pose/velocity/waypoints/ready）
 │   │   ├── vcu_sim.py           # L0：vcan 模拟 VCU（状态机+脚本切换，含 CLI）
-│   │   ├── fault_injector.py    # CAN 故障注入（急停帧等）
-│   │   └── report.py            # Markdown 报告
+│   │   └── fault_injector.py    # CAN 故障注入（急停帧等）
 │   ├── test/
 │   │   ├── test_protocol.py     # L0/L1
 │   │   ├── test_safety.py       # L2
@@ -59,7 +58,7 @@ cd hil_test
 ./scripts/hil_test.sh -l L1 -k            # 测试后保留节点（调试）
 ```
 
-> `-l all`：仿真接口（vcan0）下全自动连跑 L0→L1→L2，任一层失败即停并生成 `summary.md`；真实接口下只跑 L1，L2 需人工配合（RES/AMI），请单独运行 `-l L2`。
+> `-l all`：仿真接口（vcan0）下全自动连跑 L0→L1→L2，任一层失败即停；真实接口下只跑 L1，L2 需人工配合（RES/AMI），请单独运行 `-l L2`。
 >
 > `-k` 保留的 FSD 节点在脚本退出后仍驻留，排查完请手动停止：`ps aux | grep "ros2 run"` 找到进程后 kill（或直接关闭对应终端）。
 
@@ -67,7 +66,6 @@ cd hil_test
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `PROJECT_NAME` | `WUTA_HIL` | 报告文件名（`<日期>-<时间>-<项目>.md`） |
 | `HIL_BENCH` | 未设置 | `1` 启用 L3 台架模式（等价于 `-n`） |
 | `HIL_INTERFACE` | 读 `hil_test.yaml` | CAN 接口名（脚本自动设置；直接跑 pytest 时手动设） |
 | `HIL_CONFIG` | 无 | 配置目录（脚本自动设置；直接跑 pytest 时手动设） |
@@ -81,58 +79,32 @@ cd hil_test
 | L2 | can\_interface + mission\_manager（HIL 覆盖）+ controller |
 | L3 | can\_interface + controller                           |
 
-### 测试结果与日志
+### 测试输出与日志
 
-每次跑批（单层或 `-l all`）生成独立批次目录，**每个层级单独一个文件夹**：
+**pytest 结果全部实时打印在终端**（含 `--tb=long` 完整回溯，可追溯到断言处原始报错），不生成报告文件。失败用例直接在终端看 FAIL/ERROR 详情与 traceback。
+
+后台 FSD 节点的输出无法上终端（与 pytest 并发运行），写入节点日志。**每次运行生成一个批次目录（时间戳）**，多次执行互不覆盖，`logs/latest` 软链始终指向最新批次：
 
 ```text
 logs/
-└── 20260824_143000/                     # 批次（时间戳）
-    ├── summary.md                       # 总览：各层结果 + 详细报告链接
-    ├── L0/
-    │   ├── 20260824-143000-WUTA_HIL.md  # 详细报告（命名：日期-时间-项目）
-    │   ├── junit.xml                    # pytest 原始结果（机器可读）
-    │   └── pytest_L0.log                # pytest 完整输出（--tb=long 含回溯）
-    ├── L1/   ├── L2/   └── L3/          # 结构同 L0；有节点的层另含节点日志
-    │   └── can_interface_node.log       # 该层节点日志（L1 另有 vcu_sim.log）
+└── 20260902_220701/               # 批次（时间戳）：每次运行一个
+    ├── L1/                        # -l all 时每层一个子目录
+    │   ├── can_interface_node.log
+    │   └── vcu_sim.log            # L1 vcan0 下的 VCU 模拟
+    └── L2/
+        ├── can_interface_node.log
+        ├── mission_manager_node.log
+        └── controller_node.log
 ```
 
-- 报告命名：`<日期>-<时间>-<项目>.md`，如 `20260824-143000-WUTA_HIL.md`（项目名默认 `WUTA_HIL`，可用环境变量 `PROJECT_NAME` 覆盖）；
-- `logs/latest` 软链始终指向最新一批，即 **`logs/latest/<层级>/<日期>-<时间>-<项目>.md` 为最新详细报告**；
-- 每跑完一层，脚本末尾打印 `[run_hil] 详细报告: <路径>`。
+- 脚本启动每个节点时打印其日志路径；节点起不来 / 行为异常时看对应日志（如 `tail -50 logs/latest/L2/can_interface_node.log`）；
+- 单层或 `-l all` 跑完，脚本末尾打印 `[hil_test] <层级> 通过 / 未通过` 与本批次日志目录。
 
-**详细报告内容**（非仅 pass/fail，可追溯到具体报错）：
-
-- 汇总：用例总数 / 通过 / 失败 / 错误 / 跳过、总耗时；
-- 用例明细表：每个用例的结果（PASS/FAIL/SKIP）、耗时、失败信息；
-- 失败/错误详情：每个失败用例的**完整 traceback**（断言处原始报错），可直接定位问题；
-- `pytest_<层级>.log` 保留 `--tb=long` 完整回溯，`junit.xml` 供脚本 / CI 解析。
-
-`summary.md` 内容示例（各层报告带相对链接）：
-
-```markdown
-# HIL 测试汇总
-
-- 时间: 2026-08-24 14:30:00
-- 接口: vcan0 (mode=sim)
-- 层级: all
-
-| 层级 | 结果 | 详细报告 |
-|---|---|---|
-| L0 | 10 passed | [20260824-143000-WUTA_HIL.md](L0/20260824-143000-WUTA_HIL.md) |
-| L1 | 8 passed | [20260824-143000-WUTA_HIL.md](L1/20260824-143000-WUTA_HIL.md) |
-| L2 | 5 passed, 1 skipped | [20260824-143000-WUTA_HIL.md](L2/20260824-143000-WUTA_HIL.md) |
-
-- 日志: /home/ubuntu22/WUTA_HIL_TEST/hil_test/logs/20260824_143000
-```
-
-查看方式：IDE 直接打开，或 `cat hil_test/logs/latest/L0/*.md`。
-
-**排查定位**：用例失败先看该层详细报告（含完整 traceback）定位断言位置；节点行为问题看节点日志 `logs/latest/<层级>/can_interface_node.log`（L1 另有 `vcu_sim.log`）。
+**排查定位**：用例失败直接看终端里 pytest 输出的 traceback（定位断言/报错位置）；节点行为问题看 `logs/latest/<层级>/` 下对应节点日志。
 
 ## 分步测试流程（L0 → L3）
 
-> 每步都是一条 `./scripts/hil_test.sh -l <层级> -i <接口>` 命令：脚本自动完成「编译 FSD（可 `--no-build` 跳过）→ 准备接口 → 启动所需节点 → 跑该层全部用例 → 输出 `summary.md`」
+> 每步都是一条 `./scripts/hil_test.sh -l <层级> -i <接口>` 命令：脚本自动完成「编译 FSD（可 `--no-build` 跳过）→ 准备接口 → 启动所需节点 → 跑该层全部用例（结果实时打印在终端）」
 
 ### 步骤 0 · 一次性准备
 
@@ -159,7 +131,65 @@ git submodule status                               # WUTA-FSD 已拉取（状态
 ip link show vcan0 2>/dev/null || echo "vcan0 未创建（脚本会自动创建）"
 ```
 
-> **CAN 设备预留**：真实 USB-CAN 适配器与端口（接口名）未定前，默认 `can0`。接入后只需改 `hil_test/config/hil_test.yaml` 的 `can.interface`（如 `can1`），脚本/测试自动适配；`can.sim_interfaces` 列表内的接口视为仿真（自动起 vcu\_sim、允许 0x501 注入），其余视为真实接口。
+> **CAN 设备预留**：真实 USB-CAN 适配器与端口（接口名）未定前，默认 `can0`。接入后只需改 `hil_test/config/hil_test.yaml` 的 `can.interface`（如 `can1`），脚本/测试自动适配；`can.sim_interfaces` 列表内的接口视为仿真（自动起 vcu\_sim、允许 0x501 注入），其余视为真实接口。完整接入步骤见下方「接入真实 USB-CAN 适配器」。
+
+### 接入真实 USB-CAN 适配器（L1/L2/L3 前置）
+
+> L0 纯仿真验证无需 CAN 硬件；**L1 真实链路与 L2/L3 才需要接入真实 USB-CAN 适配器**并上电 VCU。
+
+**1. 插入并确认识别**：
+
+```bash
+lsusb                        # 找到适配器
+dmesg | tail -20             # 内核识别信息：驱动加载 / 分配的接口名
+```
+
+常见适配器与驱动：
+
+| 适配器类型 | 内核驱动 | 备注 |
+| --- | --- | --- |
+| Canable / candleLight 及其复刻（多数百元级 USB-CAN） | `gs_usb`（`sudo modprobe gs_usb`） | 即插即用 |
+| PEAK PCAN-USB | `can_peak_usb` | 即插即用 |
+| Kvaser | `kvaser_usb` | 即插即用 |
+| 周立功 USBCAN | 厂商驱动（非内核自带，按其文档安装） | 需装官方驱动 |
+| 串口转 CAN（CH340/CH341 等） | 厂商 slcan 工具 / udev 脚本 | 常见于教学板 |
+
+**2. 配置接口并设置波特率**（协议为 **500k**，需 sudo）：
+
+```bash
+sudo modprobe can can_raw          # 需要时加载
+sudo ip link set can0 up type can bitrate 500000
+ip link show can0                  # 确认 UP
+```
+
+> 真实接口需**手动**配置：脚本只检查接口是否 up，不会自动设置波特率；接口名以 `dmesg`/`ip link` 实际分配为准（can0/can1…）。
+
+**3. 验证链路**（VCU 上电后应能持续抓到 0x501 心跳）：
+
+```bash
+candump can0
+```
+
+**4. 告知 hil_test 使用该接口**：把 `hil_test/config/hil_test.yaml` 的 `can.interface` 改为实际接口名（如 `can0`/`can1`）。接口名不在 `sim_interfaces`（默认仅 `vcan0`）内即按真实接口处理——脚本会拒绝 `-l L0`（防模拟帧污染真实 VCU），L1 的 0x501 注入用例也自动跳过。
+
+**5. 权限**（非 root 用户打不开设备时报 `Operation not permitted`）：串口转 CAN 类加 `dialout` 组后重新登录；socketcan 类多数无需额外配置，个别按厂商 udev 规则。
+
+```bash
+sudo usermod -aG dialout $USER    # 之后重新登录生效
+```
+
+**6. 运行对应层级**：
+
+```bash
+cd hil_test && ./scripts/hil_test.sh -l L1 -i can0   # 链路自检 + 协议一致性（VCU 需在发 0x501）
+cd hil_test && ./scripts/hil_test.sh -l L2 -i can0   # 安全联动（需人工 RES/AMI 配合）
+```
+
+**排查**：
+
+- `ip link set can0 up` 报 `No such device`：驱动未加载或适配器未识别，`dmesg | tail` 查看；
+- VCU 上电后 `candump can0` 抓不到 0x501：先查波特率（改为 500k），再查接线 / VCU 上电；
+- 测试提示 `can_interface 未运行` 或心跳超时：看节点日志 `logs/latest/L1/can_interface_node.log`。
 
 ### 步骤 1 · L0 纯仿真验证（无硬件、无 FSD）
 
@@ -177,14 +207,14 @@ cd hil_test && ./scripts/hil_test.sh -l L0 -i vcan0
 
 **如何检验**：
 
-- 预期 `10 passed`，`logs/latest/summary.md` 生成；
+- 预期终端输出 `10 passed`；
 - 协议单测（`test_scale_center / test_little_endian / test_clamp_out_of_range` 等）：验证 0 控制→32767 中心点、小端字节序、越界钳位到 \[10, 65525]；
 - 仿真用例：`test_sim_501_heartbeat` 验证 0x501 心跳周期 100ms±20%；`test_sim_online_advance` 验证状态机 6→9→10；`test_sim_state_override` 验证急停(12)>完成(11)>驾驶(10) 优先级。
 
 **失败排查**：
 
 - vcan0 未创建/未 up：手动 `sudo ip link add vcan0 type vcan && sudo ip link set vcan0 up`；
-- 提示 `vcu_sim 无法启动`：看 `logs/latest/vcu_sim.log`，检查 `protocol.yaml` 是否合法；
+- 提示 `vcu_sim 无法启动`：L0 的 vcu_sim 由 pytest 进程内启动（无独立日志），检查 vcan0 是否 up、`protocol.yaml` 是否合法；
 - 心跳周期超差：确认 vcan0 无其他进程在发 0x501 干扰。
 
 > 注意：L0 **仅限仿真接口**，对真实接口运行会直接报错退出（防模拟帧污染真实 VCU）。
@@ -322,7 +352,7 @@ python -m pytest test/test_safety.py -m safety -q        # L2（需节点 + 真�
 
 ## 常见问题速查
 
-脚本级 / 环境级报错按「症状 → 原因 → 处理」集中排查（用例级失败见各层「失败排查」与详细报告 traceback）：
+脚本级 / 环境级报错按「症状 → 原因 → 处理」集中排查（用例级失败直接看终端里 pytest 的 traceback）：
 
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |
@@ -331,7 +361,7 @@ python -m pytest test/test_safety.py -m safety -q        # L2（需节点 + 真�
 | 创建 vcan0 提示 `sudo: a terminal is required` | 非交互终端下 sudo 无法读密码 | 先 `sudo -v` 预授权，或换交互终端 |
 | 集成用例超时（话题收不到） | ROS_DOMAIN_ID 不一致 / 节点未启动 / workspace 未 source | 两端设置相同 `ROS_DOMAIN_ID`；`ros2 node list` 确认节点在线 |
 | 真实接口 0x501 心跳超时 | VCU 未上电 / CAN 波特率不匹配 / USB-CAN 未识别 | `candump can0` 确认能抓帧；`sudo ip link set can0 up type can bitrate 500000`；`dmesg \| tail` 查适配器 |
-| 提示 `can_interface 未运行` | FSD 未编译 / 未 source workspace | 看 `logs/latest/<层级>/can_interface_node.log`，确认执行过编译 |
+| 提示 `can_interface 未运行` | FSD 未编译 / 未 source workspace | 看 `logs/latest/L1/can_interface_node.log`，确认执行过编译 |
 
 ## 安全约定
 

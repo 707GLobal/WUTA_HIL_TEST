@@ -96,14 +96,12 @@ if [ -f "$FSD_WS/install/setup.bash" ]; then
   source "$FSD_WS/install/setup.bash"  # --no-build 时也保证 FSD 消息/节点可用
 fi
 set -u
-# ---- 日志目录：按批次时间戳归档，logs/latest 指向最新一批 ----
+# ---- 节点日志目录：每次运行一个批次（时间戳），logs/latest 指向最新批次 ----
+# 仅存后台节点日志；pytest 输出全量走终端，不落盘
 mkdir -p "$HIL_ROOT/logs"
 LOG_DIR="$HIL_ROOT/logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_DIR"
 ln -sfn "$LOG_DIR" "$HIL_ROOT/logs/latest"
-
-PROJECT_NAME="${PROJECT_NAME:-WUTA_HIL}"   # 报告文件名用：日期-时间-项目
-export HIL_PROJECT="$PROJECT_NAME"
 
 # ---- 编译 FSD ----
 if [ "$CLEAN_BUILD" -eq 1 ] && [ "$DO_BUILD" -eq 0 ]; then
@@ -154,11 +152,12 @@ prepare_interface() {
 prepare_interface
 
 # ---- FSD 节点管理 ----
+# setsid 独立进程组启动；停止时杀整组，避免 ros2 run 包装进程被杀后节点变孤儿
 NODE_PIDS=()
 start_node() {
   local pkg="$1" exe="$2"; shift 2
   local log_dir="${HIL_LEVEL_DIR:-$LOG_DIR}"
-  ros2 run "$pkg" "$exe" "$@" >"$log_dir/$exe.log" 2>&1 &
+  setsid ros2 run "$pkg" "$exe" "$@" >"$log_dir/$exe.log" 2>&1 &
   local pid=$!
   NODE_PIDS+=("$pid")
   echo "==> 启动 $exe (pid $pid, log $log_dir/$exe.log)"
@@ -172,15 +171,17 @@ wait_node_ready() {
     fi
     sleep 0.5
   done
-  echo "!! 节点 $name 未就绪，见 ${HIL_LEVEL_DIR:-$LOG_DIR}/$name.log" >&2
+  echo "!! 节点 $name 未就绪，查看节点日志: ${HIL_LEVEL_DIR:-$LOG_DIR}/*.log" >&2
   return 1
 }
 
 # ---- 停止节点（层间切换 / 退出清理） ----
 stop_nodes() {
   [ "${#NODE_PIDS[@]}" -eq 0 ] && return 0
-  local n=${#NODE_PIDS[@]}
-  kill "${NODE_PIDS[@]}" 2>/dev/null || true
+  local n=${#NODE_PIDS[@]} pid
+  for pid in "${NODE_PIDS[@]}"; do
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  done
   NODE_PIDS=()
   echo "==> 已停止节点 ($n)"
 }
@@ -218,7 +219,7 @@ start_level_nodes() {
         NODE_PIDS+=($!)
         echo "==> 启动 vcu_sim (pid ${NODE_PIDS[-1]})"
       fi
-      wait_node_ready can_interface_node
+      wait_node_ready can_interface
       ;;
     L2)
       start_node can_interface can_interface_node \
@@ -227,27 +228,23 @@ start_level_nodes() {
         --ros-args --params-file "$MM_PARAMS" --params-file "$MM_HIL_PARAMS"
       start_node controller controller_node \
         --ros-args --params-file "$CTRL_PARAMS"
-      wait_node_ready can_interface_node
+      wait_node_ready can_interface
       ;;
     L3)
       start_node can_interface can_interface_node \
         --ros-args --params-file "$CAN_PARAMS" -p can_device:="$INTERFACE"
       start_node controller controller_node \
         --ros-args --params-file "$CTRL_PARAMS"
-      wait_node_ready can_interface_node
+      wait_node_ready can_interface
       ;;
   esac
 }
 
-# ---- 跑单层：起节点 → pytest → 记录结果 → 停节点 ----
-SUMMARY_LOG="$LOG_DIR/levels.txt"
-: > "$SUMMARY_LOG"
-
+# ---- 跑单层：起节点 → pytest（输出直通终端）→ 停节点 ----
 run_level() {
   local level="$1"
-  LEVEL_DIR="$LOG_DIR/$level"
-  mkdir -p "$LEVEL_DIR"
-  export HIL_LEVEL_DIR="$LEVEL_DIR"
+  export HIL_LEVEL_DIR="$LOG_DIR/$level"
+  mkdir -p "$HIL_LEVEL_DIR"
   echo ""
   echo "==> 运行 $level (interface=$INTERFACE)"
   start_level_nodes "$level"
@@ -256,43 +253,15 @@ run_level() {
   if [ "$BENCH" -eq 1 ]; then
     export HIL_BENCH=1
   fi
-  python3 "$HIL_ROOT/scripts/run_hil.py" --level "$level" --interface "$INTERFACE" \
-    --report-dir "$LEVEL_DIR" \
-    2>&1 | tee "$LEVEL_DIR/pytest_$level.log"
-  local rc=${PIPESTATUS[0]}
-  local line report
-  line="$(grep -E "[0-9]+ (passed|failed|error)" "$LEVEL_DIR/pytest_$level.log" | tail -1 || echo '无输出')"
-  report="$(basename "$(ls "$LEVEL_DIR"/*.md 2>/dev/null | head -1)" 2>/dev/null || true)"
-  echo "$level|$line|$report" >> "$SUMMARY_LOG"
+  python3 "$HIL_ROOT/scripts/run_hil.py" --level "$level" --interface "$INTERFACE"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "!! $level 未通过 (exit=$rc)；节点日志: $HIL_LEVEL_DIR/*.log" >&2
+  fi
   if [ "$LEVEL" = "all" ] || [ "$KEEP_NODES" -eq 0 ]; then
     stop_nodes
   fi
   return $rc
-}
-
-# ---- 汇总 Markdown ----
-write_summary() {
-  local md="$LOG_DIR/summary.md"
-  {
-    echo "# HIL 测试汇总"
-    echo ""
-    echo "- 时间: $(date '+%F %T')"
-    echo "- 接口: $INTERFACE (mode=$MODE)"
-    echo "- 层级: $LEVEL"
-    echo ""
-    echo "| 层级 | 结果 | 详细报告 |"
-    echo "|---|---|---|"
-    while IFS='|' read -r lv res rep; do
-      if [ -n "$rep" ]; then
-        echo "| $lv | ${res:-未执行} | [$rep]($lv/$rep) |"
-      else
-        echo "| $lv | ${res:-未执行} | - |"
-      fi
-    done < "$SUMMARY_LOG"
-    echo ""
-    echo "- 日志: $LOG_DIR"
-  } > "$md"
-  echo "$md"
 }
 
 # ---- 执行 ----
@@ -320,16 +289,14 @@ else
   run_level "$LEVEL" || TEST_RC=$?
 fi
 
-SUMMARY_MD="$(write_summary)"
-
-# ---- 输出结果 ----
-LAST_LINE="$(tail -1 "$SUMMARY_LOG")"
-RESULT="${LAST_LINE#*|}"
-RESULT="${RESULT%%|*}"
+# ---- 输出结果（pytest 明细已实时打到终端） ----
 echo ""
 echo "=============================================="
-echo "[hil_test] $LEVEL 结果: ${RESULT:-无输出}"
-echo "[hil_test] 日志: $LOG_DIR"
-echo "[hil_test] 汇总: $SUMMARY_MD"
+if [ "$TEST_RC" -eq 0 ]; then
+  echo "[hil_test] $LEVEL 通过"
+else
+  echo "[hil_test] $LEVEL 未通过 (exit=$TEST_RC)"
+fi
+echo "[hil_test] 节点日志目录: $LOG_DIR（logs/latest 指向最新批次）"
 echo "=============================================="
 exit "$TEST_RC"

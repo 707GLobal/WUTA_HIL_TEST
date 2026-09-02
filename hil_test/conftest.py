@@ -12,6 +12,7 @@
 
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
@@ -50,7 +51,8 @@ def _if_up(name):
         import socket
         import struct
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        res = fcntl.ioctl(sock.fileno(), 0x8912, struct.pack('256s', name.encode()[:15]))
+        # SIOCGIFFLAGS = 0x8913（0x8912 是 SIOCGIFCONF，取不到 flags）
+        res = fcntl.ioctl(sock.fileno(), 0x8913, struct.pack('256s', name.encode()[:15]))
         flags = struct.unpack('H', res[16:18])[0]
         return bool(flags & 0x1)  # IFF_UP
     except OSError:
@@ -126,10 +128,14 @@ def ros():
 
 @pytest.fixture
 def fsd_ready(ros):
-    """can_interface 节点在线；否则跳过集成用例."""
-    if 'can_interface' not in ros.graph_nodes():
-        pytest.skip('can_interface 未运行（先启动 FSD），集成用例跳过')
-    return ros
+    """can_interface 节点在线；否则跳过集成用例（轮询等待 DDS 发现，避免偶发漏判）."""
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        ros.spin_once()
+        if 'can_interface' in ros.graph_nodes():
+            return ros
+        time.sleep(0.2)
+    pytest.skip('can_interface 未运行（先启动 FSD），集成用例跳过')
 
 
 @pytest.fixture
