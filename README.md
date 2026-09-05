@@ -55,6 +55,7 @@ cd hil_test
 ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
 ./scripts/hil_test.sh -c -l L1            # 编译前清理 FSD 缓存（build/install/log），全量重编
 ./scripts/hil_test.sh -p "can_interface mission_manager controller" -l L2  # 只编指定包
+./scripts/hil_test.sh --lite-build -l L1  # Lite 编译：并行编译数限制为 1（内存受限防 OOM）
 ./scripts/hil_test.sh -l L1 -k            # 测试后保留节点（调试）
 ```
 
@@ -120,7 +121,7 @@ CAN 内核模块（USB-CAN 适配器依赖 `can_raw`，仿真依赖 `vcan`；一
 sudo modprobe can can_raw vcan
 ```
 
-脚本首次运行会自动 `colcon build` 编译 FSD（较慢），之后可加 `--no-build` 跳过。**`--no-build` 仅当 FSD 已编译过（`WUTA-FSD/ros2_ws/install/setup.bash` 存在）时可用**，首次运行或 FSD 代码更新后请不带该选项跑一次。创建 vcan0 需要 sudo（脚本自动执行，会提示密码；非交互终端下请先 `sudo -v`）。
+脚本首次运行会自动 `colcon build` 编译 FSD（较慢），之后可加 `--no-build` 跳过。**`--no-build` 仅当 FSD 已编译过（`WUTA-FSD/ros2_ws/install/setup.bash` 存在）时可用**，首次运行或 FSD 代码更新后请不带该选项跑一次。编译时若出现内存溢出（进程被 OOM killer 杀掉 / 编译报错退出），加 `--lite-build` 将并行编译数限制为 1 重试。创建 vcan0 需要 sudo（脚本自动执行，会提示密码；非交互终端下请先 `sudo -v`）。
 
 环境自检（任一步失败先解决对应依赖，再进入下一步）：
 
@@ -362,6 +363,7 @@ python -m pytest test/test_safety.py -m safety -q        # L2（需节点 + 真�
 | 集成用例超时（话题收不到） | ROS_DOMAIN_ID 不一致 / 节点未启动 / workspace 未 source | 两端设置相同 `ROS_DOMAIN_ID`；`ros2 node list` 确认节点在线 |
 | 真实接口 0x501 心跳超时 | VCU 未上电 / CAN 波特率不匹配 / USB-CAN 未识别 | `candump can0` 确认能抓帧；`sudo ip link set can0 up type can bitrate 500000`；`dmesg \| tail` 查适配器 |
 | 提示 `can_interface 未运行` | FSD 未编译 / 未 source workspace | 看 `logs/latest/L1/can_interface_node.log`，确认执行过编译 |
+| 编译 FSD 时进程被杀（Killed / OOM） | 全量并行编译内存不足 | 加 `--lite-build` 限制并行编译数为 1 重试 |
 
 ## 安全约定
 

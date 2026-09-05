@@ -22,6 +22,7 @@ MODE=""                  # sim=仿真(vcan) | real=真实(USB-CAN)，缺省按�
 DO_BUILD=1
 BUILD_PKGS=""
 CLEAN_BUILD=0
+LITE_BUILD=0
 KEEP_NODES=0
 BENCH=0
 
@@ -36,6 +37,7 @@ usage() {
       --no-build                    跳过编译
   -c, --clean                       编译前清理 FSD 缓存（build/install/log，全量重编）
   -p, --build-packages <pkgs>       只编译指定包（空格分隔；缺省全量）
+      --lite-build                  Lite 编译：并行编译数限制为 1（内存受限防 OOM）
   -k, --keep-nodes                  测试后保留 FSD 节点（便于调试）
   -n, --bench                       L3 台架模式（HIL_BENCH=1）
   -h, --help                        帮助
@@ -52,6 +54,7 @@ while [ $# -gt 0 ]; do
     --no-build) DO_BUILD=0; shift ;;
     -c|--clean) CLEAN_BUILD=1; shift ;;
     -p|--build-packages) BUILD_PKGS="$2"; shift 2 ;;
+    --lite-build) LITE_BUILD=1; shift ;;
     -k|--keep-nodes) KEEP_NODES=1; shift ;;
     -n|--bench) BENCH=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -115,10 +118,16 @@ if [ "$DO_BUILD" -eq 1 ]; then
     echo "==> 清理 FSD 编译缓存（build/install/log）"
     rm -rf "$FSD_WS/build" "$FSD_WS/install" "$FSD_WS/log"
   fi
+  # --lite-build: 限制并行编译数为 1，避免内存溢出（默认全量并行编译）
+  local build_jobs=()
+  if [ "$LITE_BUILD" -eq 1 ]; then
+    build_jobs=(--parallel-workers 1)
+    echo "==> Lite 编译：并行编译数限制为 1"
+  fi
   if [ -n "$BUILD_PKGS" ]; then
-    colcon build --packages-select $BUILD_PKGS
+    colcon build --packages-select $BUILD_PKGS "${build_jobs[@]}"
   else
-    colcon build
+    colcon build "${build_jobs[@]}"
   fi
   set +u
   source "$FSD_WS/install/setup.bash"
