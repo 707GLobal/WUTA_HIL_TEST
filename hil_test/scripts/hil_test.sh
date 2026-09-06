@@ -6,6 +6,7 @@
 #   ./scripts/hil_test.sh -l L1 -i vcan0      # 直接指定链路与接口
 #   ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线: L0→L1→L2 连跑(失败即停)
 #   ./scripts/hil_test.sh -l L3 -i can0 -n    # L3 台架模式
+#   ./scripts/hil_test.sh -l L1 -i can0 --bridge  # 真实 ZLG USB-CAN：自动启停 zlgcan_bridge
 #   ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
 set -euo pipefail
 
@@ -25,6 +26,8 @@ CLEAN_BUILD=0
 LITE_BUILD=0
 KEEP_NODES=0
 BENCH=0
+BRIDGE_ARG=0
+BRIDGE_SCRIPT="$REPO_ROOT/zlgcan_bridge/scripts/start_bridge.sh"
 
 usage() {
   cat <<EOF
@@ -40,6 +43,7 @@ usage() {
       --lite-build                  Lite 编译：并行编译数限制为 1（内存受限防 OOM）
   -k, --keep-nodes                  测试后保留 FSD 节点（便于调试）
   -n, --bench                       L3 台架模式（HIL_BENCH=1）
+      --bridge                      真实 ZLG USB-CAN 模式：自动启停 zlgcan_bridge（-i can0）
   -h, --help                        帮助
 EOF
 }
@@ -57,6 +61,7 @@ while [ $# -gt 0 ]; do
     --lite-build) LITE_BUILD=1; shift ;;
     -k|--keep-nodes) KEEP_NODES=1; shift ;;
     -n|--bench) BENCH=1; shift ;;
+    --bridge) BRIDGE_ARG=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知选项: $1" >&2; usage; exit 1 ;;
   esac
@@ -70,6 +75,37 @@ if [ -z "$MODE" ]; then
   esac
 fi
 case "$MODE" in sim|real) ;; *) echo "!! 非法 mode: $MODE" >&2; exit 1 ;; esac
+
+# ---- ZLGCAN 桥接开关：--bridge 强制开启；否则读 hil_test.yaml can.bridge.enabled ----
+cfg_get() {
+  # 从 yaml 按点分键取值（取不到输出空串），如 can.bridge.enabled
+  python3 - "$1" "$2" <<'PYEOF' 2>/dev/null || true
+import sys, yaml
+with open(sys.argv[1]) as f:
+    val = yaml.safe_load(f)
+for part in sys.argv[2].split('.'):
+    if not isinstance(val, dict) or part not in val:
+        sys.exit(0)
+    val = val[part]
+if val is not None:
+    print(str(val).lower() if isinstance(val, bool) else val)
+PYEOF
+}
+BRIDGE=0
+BRIDGE_CFG="$(cfg_get "$HIL_ROOT/config/hil_test.yaml" "can.bridge.enabled")"
+[ "$BRIDGE_CFG" = "true" ] && BRIDGE=1
+[ "$BRIDGE_ARG" -eq 1 ] && BRIDGE=1
+if [ "$BRIDGE" -eq 1 ]; then
+  if [ "$MODE" != "real" ]; then
+    echo "!! --bridge 仅用于真实 ZLG USB-CAN（real 模式），本次按纯仿真继续（桥接已忽略）" >&2
+    BRIDGE=0
+  elif [ ! -x "$BRIDGE_SCRIPT" ]; then
+    echo "!! 未找到桥接脚本: $BRIDGE_SCRIPT" >&2
+    exit 1
+  else
+    echo "==> ZLGCAN 桥接模式已启用（ZLG 硬件 -> $INTERFACE）"
+  fi
+fi
 
 # ---- 链路合法性校验 / 交互选择 ----
 valid_level() {
@@ -141,8 +177,13 @@ prepare_interface() {
       echo "==> 创建 $INTERFACE（需 sudo）"
       sudo ip link add "$INTERFACE" type vcan
       sudo ip link set "$INTERFACE" up
+    elif [ "$BRIDGE" -eq 1 ]; then
+      # 桥接模式：can0 为 vcan 类型本地接口，由桥接脚本负责创建/启动
+      echo "==> 桥接模式: $INTERFACE 不存在，由 zlgcan_bridge 创建（vcan 类型）"
+      ZLG_CAN_IFACE="$INTERFACE" "$BRIDGE_SCRIPT" iface
     else
       echo "!! $INTERFACE 不存在，请先接入 USB-CAN 并配置接口（modprobe + ip link set $INTERFACE up）" >&2
+      echo "   若使用 ZLG USBCAN-2E-U，可加 --bridge 由 zlgcan_bridge 自动桥接" >&2
       exit 1
     fi
   fi
@@ -151,6 +192,8 @@ prepare_interface() {
     if [ "$MODE" = "sim" ]; then
       echo "==> 启动 $INTERFACE（需 sudo）"
       sudo ip link set "$INTERFACE" up
+    elif [ "$BRIDGE" -eq 1 ]; then
+      ZLG_CAN_IFACE="$INTERFACE" "$BRIDGE_SCRIPT" iface
     else
       echo "!! $INTERFACE 未 up（ip link set $INTERFACE up）" >&2
       exit 1
@@ -159,6 +202,25 @@ prepare_interface() {
   echo "==> 接口 $INTERFACE 就绪（mode=$MODE）"
 }
 prepare_interface
+
+# ---- ZLGCAN 桥接启停（真实 ZLG 硬件时桥接进程先于 FSD 节点就绪）----
+# 桥接日志默认收进本次批次目录（logs/latest/bridge.log），与节点日志统一管理
+BRIDGE_LOG="$LOG_DIR/bridge.log"
+start_bridge() {
+  [ "$BRIDGE" -eq 1 ] || return 0
+  echo "==> 启动 ZLGCAN 桥接（ZLG 设备 -> $INTERFACE）"
+  ZLG_CAN_IFACE="$INTERFACE" ZLG_LOG_FILE="$BRIDGE_LOG" "$BRIDGE_SCRIPT" start || {
+    echo "!! ZLGCAN 桥接启动失败（检查 libzlgcan.so 与设备连接，日志: $BRIDGE_LOG）" >&2
+    exit 1
+  }
+  echo "==> 桥接日志: $BRIDGE_LOG（tail -f 实时查看收发统计/掉线重连）"
+}
+
+stop_bridge() {
+  [ "$BRIDGE" -eq 1 ] || return 0
+  ZLG_CAN_IFACE="$INTERFACE" "$BRIDGE_SCRIPT" stop || true
+}
+start_bridge
 
 # ---- FSD 节点管理 ----
 # setsid 独立进程组启动；停止时杀整组，避免 ros2 run 包装进程被杀后节点变孤儿
@@ -202,6 +264,7 @@ cleanup() {
   fi
   stop_nodes
   echo "==> FSD 节点已清理"
+  stop_bridge
 }
 trap cleanup EXIT
 

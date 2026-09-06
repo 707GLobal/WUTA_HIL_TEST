@@ -32,6 +32,7 @@ WUTA_HIL_TEST/
 │   │   ├── hil_test.sh          # 一键脚本（编译+节点+测试+清理）
 │   │   └── run_hil.py           # 分层 pytest 入口
 │   └── conftest.py              # pytest fixtures / markers
+├── zlgcan_bridge/               # ZLG USB-CAN 桥接（USBCAN-2E-U 私有协议 → SocketCAN can0）
 └── WUTA-FSD/                    # FSD 算法仓库（git 子模块）
 ```
 
@@ -52,6 +53,7 @@ cd hil_test
 ./scripts/hil_test.sh -l L1 -i vcan0      # 直接指定链路与接口
 ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线：L0→L1→L2 连跑（失败即停）
 ./scripts/hil_test.sh -l L3 -i can0 -n    # L3 台架
+./scripts/hil_test.sh -l L1 -i can0 --bridge  # 真实 ZLG USB-CAN：自动启停 zlgcan_bridge
 ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
 ./scripts/hil_test.sh -c -l L1            # 编译前清理 FSD 缓存（build/install/log），全量重编
 ./scripts/hil_test.sh -p "can_interface mission_manager controller" -l L2  # 只编指定包
@@ -89,6 +91,7 @@ cd hil_test
 ```text
 logs/
 └── 20260902_220701/               # 批次（时间戳）：每次运行一个
+    ├── bridge.log                 # 桥接模式（--bridge）时 ZLG 设备日志（收发统计/掉线重连）
     ├── L1/                        # -l all 时每层一个子目录
     │   ├── can_interface_node.log
     │   └── vcu_sim.log            # L1 vcan0 下的 VCU 模拟
@@ -152,7 +155,7 @@ dmesg | tail -20             # 内核识别信息：驱动加载 / 分配的接�
 | Canable / candleLight 及其复刻（多数百元级 USB-CAN） | `gs_usb`（`sudo modprobe gs_usb`） | 即插即用 |
 | PEAK PCAN-USB | `can_peak_usb` | 即插即用 |
 | Kvaser | `kvaser_usb` | 即插即用 |
-| 周立功 USBCAN | 厂商驱动（非内核自带，按其文档安装） | 需装官方驱动 |
+| 周立功 USBCAN-2E-U | 无内核驱动（厂商私有协议） | 走 `zlgcan_bridge` 用户态桥接，见下方「周立功 USBCAN-2E-U 桥接」 |
 | 串口转 CAN（CH340/CH341 等） | 厂商 slcan 工具 / udev 脚本 | 常见于教学板 |
 
 **2. 配置接口并设置波特率**（协议为 **500k**，需 sudo）：
@@ -191,6 +194,21 @@ cd hil_test && ./scripts/hil_test.sh -l L2 -i can0   # 安全联动（需人工 
 - `ip link set can0 up` 报 `No such device`：驱动未加载或适配器未识别，`dmesg | tail` 查看；
 - VCU 上电后 `candump can0` 抓不到 0x501：先查波特率（改为 500k），再查接线 / VCU 上电；
 - 测试提示 `can_interface 未运行` 或心跳超时：看节点日志 `logs/latest/L1/can_interface_node.log`。
+
+### 周立功 USBCAN-2E-U 桥接（zlgcan_bridge）
+
+周立功设备为厂商私有协议（非内核 SocketCAN，**不适用上节第 2 步的 `ip link` 配置**），需先运行 `zlgcan_bridge` 将其桥接为 SocketCAN `can0`（vcan 类型），此后 FSD 与 hil_test 均无需任何修改：
+
+```bash
+cd zlgcan_bridge
+cp /path/to/libzlgcan.so lib/          # 放置厂商 SDK（lib/*.so 不入库）
+./scripts/start_bridge.sh selftest     # 无硬件自测：验证 SDK 可加载、API 调用链正常
+./scripts/start_bridge.sh start        # 后台启动：自动创建 can0 → 连接设备 → 双向转发
+```
+
+- **日志**：独立启动（`start_bridge.sh start`）时追加写 `zlgcan_bridge/bridge.log`（启动配置、连接各步骤、每 5s 收发统计、掉线重连记录）；前台模式（不带参数）直接打印终端；加 `-v` 输出逐帧 TRACE。`tail -f` 实时查看、`grep -E "ERROR|WARN"` 快速定位。
+- **经 hil_test 一键运行**：`./scripts/hil_test.sh -l L1 -i can0 --bridge`，脚本自动创建 can0、启停桥接（测试结束自动停止），并把 CAN 设备日志收集进本次批次目录 `logs/latest/bridge.log`（与节点日志统一管理，脚本启动时会打印路径）；或在 `hil_test/config/hil_test.yaml` 将 `can.bridge.enabled` 设为 `true` 常开。
+- 详见 `zlgcan_bridge/docs/部署使用说明.md`。
 
 ### 步骤 1 · L0 纯仿真验证（无硬件、无 FSD）
 

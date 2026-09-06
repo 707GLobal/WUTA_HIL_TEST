@@ -4,6 +4,9 @@ can:
   bitrate: 500000        # 波特率
   sim_interfaces:        # 仿真接口列表：匹配则自动起 vcu_sim / 允许 0x501 注入
     - vcan0
+  bridge:                # ZLG USB-CAN 桥接（USBCAN-2E-U 为厂商私有协议，经 zlgcan_bridge 桥接为 SocketCAN）
+    enabled: false       # true=真实 ZLG 硬件模式：hil_test.sh 自动启停桥接进程（也可用 --bridge 临时开启）
+    dir: zlgcan_bridge   # 桥接工程目录（相对仓库根）
 
 test:
   frames:
