@@ -32,7 +32,9 @@ WUTA_HIL_TEST/
 │   │   ├── hil_test.sh          # 一键脚本（编译+节点+测试+清理）
 │   │   └── run_hil.py           # 分层 pytest 入口
 │   └── conftest.py              # pytest fixtures / markers
-├── zlgcan_bridge/               # ZLG USB-CAN 桥接（USBCAN-2E-U 私有协议 → SocketCAN can0；git 子模块）
+├── zlgcan_bridge/               # ZLG USB-CAN 桥接（USBCAN-4E-U → SocketCAN can0；git 子模块）
+│   ├── bridge.yaml              # 桥参数（devtype/devidx/chn/baud/iface），无需改源码
+│   └── start_zlg_bridge.sh      # 一键：检查硬件 → 建 can0(vcan) → 编译 → 前台起桥
 └── WUTA-FSD/                    # FSD 算法仓库（git 子模块）
 ```
 
@@ -52,8 +54,8 @@ cd hil_test
 ./scripts/hil_test.sh                     # 交互：编译 FSD → 选链路 → 跑 → 出结果
 ./scripts/hil_test.sh -l L1 -i vcan0      # 直接指定链路与接口
 ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线：L0→L1→L2 连跑（失败即停）
-./scripts/hil_test.sh -l L3 -i can0 --bridge -n  # L3 台架（ZLG 桥接，-n 开启台架模式）
-./scripts/hil_test.sh -l L1 -i can0 --bridge  # 真实 ZLG USB-CAN：自动启停 zlgcan_bridge
+./scripts/hil_test.sh -l L3 -i can0 -n    # L3 台架（-n 开启台架模式；需先起桥，见「接入真实 VCU」）
+./scripts/hil_test.sh -l L1 -i can0       # 真实 ZLG USB-CAN（需先起桥，见「接入真实 VCU」）
 ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
 ./scripts/hil_test.sh -c -l L1            # 编译前清理 FSD 缓存（build/install/log），全量重编
 ./scripts/hil_test.sh -p "can_interface mission_manager controller" -l L2  # 只编指定包
@@ -64,6 +66,8 @@ cd hil_test
 > `-l all`：仿真接口（vcan0）下全自动连跑 L0→L1→L2，任一层失败即停；真实接口下只跑 L1，L2 需人工配合（RES/AMI），请单独运行 `-l L2`。
 >
 > `-k` 保留的 FSD 节点在脚本退出后仍驻留，排查完请手动停止：`ps aux | grep "ros2 run"` 找到进程后 kill（或直接关闭对应终端）。
+>
+> **真实接口（can0）需先手动起桥**：`cd zlgcan_bridge && sudo ./start_zlg_bridge.sh`（保持该终端运行），再用 `-i can0` 跑测试。hil_test 不再自动启停桥。
 
 ### 环境变量
 
@@ -91,7 +95,6 @@ cd hil_test
 ```text
 logs/
 └── 20260902_220701/               # 批次（时间戳）：每次运行一个
-    ├── bridge.log                 # 桥接模式（--bridge）时 ZLG 设备日志（收发统计/掉线重连）
     ├── L1/                        # -l all 时每层一个子目录
     │   ├── can_interface_node.log
     │   └── vcu_sim.log            # L1 vcan0 下的 VCU 模拟
@@ -118,7 +121,7 @@ sudo apt install can-utils        # 调试可选：candump / cansend
 cd hil_test
 ```
 
-CAN 内核模块（vcan0 仿真与桥接产生的本地 can0 都依赖 `vcan`/`can_raw`；一般随内核自动加载，精简内核需手动加载。周立功 USBCAN-2E-U 本身无内核驱动，经 `zlgcan_bridge` 用户态桥接，不依赖内核 CAN 驱动）：
+CAN 内核模块（vcan0 仿真与桥接产生的本地 can0 都依赖 `vcan`/`can_raw`；一般随内核自动加载，精简内核需手动加载。周立功 USBCAN-4E-U 本身无内核驱动，经 `zlgcan_bridge` 用户态桥接，不依赖内核 CAN 驱动）：
 
 ```bash
 sudo modprobe can can_raw vcan
@@ -135,56 +138,71 @@ git submodule status                               # 子模块已拉取（WUTA-F
 ip link show vcan0 2>/dev/null || echo "vcan0 未创建（脚本会自动创建）"
 ```
 
-> **CAN 设备预留**：真实 CAN 硬件固定为**周立功 USBCAN-2E-U**（500k，厂商私有协议），经 `zlgcan_bridge` 桥接为本地 SocketCAN `can0`（vcan 类型）——接口名固定 `can0`，无需改 `hil_test/config/hil_test.yaml` 的 `can.interface`；`can.sim_interfaces` 列表内的接口（默认仅 `vcan0`）视为仿真（自动起 vcu\_sim、允许 0x501 注入），其余视为真实接口。完整接入步骤见下方「接入真实 VCU」。
+> **CAN 设备预留**：真实 CAN 硬件为**周立功 USBCAN-4E-U**（500k，`libusbcan-4e.so` 用户态驱动），经 `zlgcan_bridge` 桥接为本地 SocketCAN `can0`（vcan 类型）——接口名默认 `can0`（可在 `zlgcan_bridge/bridge.yaml` 改，改后测试的 `-i` 需同步）；`can.sim_interfaces` 列表内的接口（默认仅 `vcan0`）视为仿真（自动起 vcu\_sim、允许 0x501 注入），其余视为真实接口。完整接入步骤见下方「接入真实 VCU」。
 
 ### 接入真实 VCU（L1/L2/L3 前置）
 
 > L0 纯仿真验证无需 CAN 硬件；**L1 真实链路与 L2/L3 才需要接入真实 USB-CAN 适配器并上电 VCU**。
-> 当前 CAN 盒硬件为 **周立功 USBCAN-2E-U**：厂商私有协议、无内核驱动（不能像内核 SocketCAN 那样 `ip link` 直接配置），由 `zlgcan_bridge` 用户态桥接为本地 SocketCAN `can0`（vcan 类型）。此后 FSD `can_interface` 与 hil_test 均无需任何修改：
+> 当前 CAN 盒硬件为 **周立功 USBCAN-4E-U**：USB 用户态驱动（`libusbcan-4e.so`），不是内核 SocketCAN 设备（`ip link` / `dmesg` 里看不到 CAN 网卡属正常），由 `zlgcan_bridge` 用户态桥接为本地 SocketCAN `can0`（vcan 类型）。此后 FSD `can_interface` 与 hil_test 均无需任何修改：
 
 ```text
-真实 VCU ⇄ CAN 总线(500k) ⇄ USBCAN-2E-U ⇄ libzlgcan.so ⇄ zlgcan_bridge ⇄ can0(vcan) ⇄ FSD can_interface / hil_test
+真实 VCU ⇄ CAN 总线(500k) ⇄ USBCAN-4E-U ⇄ libusbcan-4e.so ⇄ zlgcan_bridge ⇄ can0(vcan) ⇄ FSD can_interface / hil_test
 ```
 
-**1. 放置 SDK 并无硬件自测**（一次性准备）：
+**1. 安装厂商 Linux 驱动**（一次性准备）：
+已安装，后面再补充 https://fy63ozvxdv.feishu.cn/file/UC8IbcxTeo1a83x4wZbcAa26n5E
+
+**2. 插入并确认设备**：`lsusb -d 0471:126a` 能看到周立功 USBCAN-4E-U 即可（无内核驱动，`dmesg`/`ip link` 看不到属正常）。
+
+**3. 配置桥参数**：编辑 `zlgcan_bridge/bridge.yaml`（常用参数集中在此，**无需改源码**）。读取该文件依赖 PyYAML（步骤 0 已装 `python3-yaml`）；若 `python3 -c "import yaml"` 不可用，会**静默回落到内置默认值**（`devtype=31 devidx=0 chn=0 baud=500000 iface=can0`），此时改 yaml 不生效，请先补装 PyYAML：
+
+```yaml
+devtype: 31        # ZLG 设备类型: 31=USBCAN-4E-U
+devidx: 0          # 同型号设备序号
+chn: 0             # 使用的 CAN 通道（4E-U 有 0~3）
+baud: 500000       # CAN 波特率，须与 VCU 一致
+iface: can0        # 桥输出的 SocketCAN 接口名（不可用 vcan* 开头）
+```
+
+**4. 启动桥并验证链路**（保持该终端运行；VCU 上电后应能持续抓到 0x501）：
 
 ```bash
 cd zlgcan_bridge
-cp /path/to/libzlgcan.so lib/          # 厂商 Linux SDK（lib/*.so 不入库）
-./scripts/start_bridge.sh selftest     # 无硬件自测：验证 SDK 可加载、API 调用链正常
+sudo ./start_zlg_bridge.sh              # 检查硬件 → 建 can0(vcan) → 编译 → 前台起桥
+sudo ./start_zlg_bridge.sh --chn=1      # 临时覆盖 bridge.yaml 中的通道（优先级：命令行 > yaml > 默认）
+sudo ./start_zlg_bridge.sh --help       # 查看全部参数
 ```
 
-**2. 插入并确认设备**：`lsusb` 能看到周立功设备即可（无内核驱动，`dmesg`/`ip link` 看不到属正常）。
+桥每 2 秒打印一次收发统计，**这是判断问题出在哪一段的关键**：
 
-**3. 验证链路**（hil_test 之外单独用硬件时独立启停桥接，VCU 上电后应能持续抓到 0x501）：
+```text
+[bridge] FSD->VCU:129  VCU->FSD:0  (err 0/0)
+```
+
+另开终端验证：
 
 ```bash
-cd zlgcan_bridge
-./scripts/start_bridge.sh start    # 后台启动：自动创建 can0 → 连接设备 → 双向转发
-./scripts/start_bridge.sh status   # 查看运行状态（running / stopped）
-candump can0
-./scripts/start_bridge.sh stop     # 停止
-./scripts/start_bridge.sh          # 前台运行（调试），加 -v 输出逐帧 TRACE
+candump can0        # VCU 上电应持续看到 0x501，周期 100ms
 ```
 
-**4. 经 hil_test 一键运行**（真实接口固定 `-i can0`；`--bridge` 让脚本自动启停桥接，也可在 `hil_test/config/hil_test.yaml` 把 `can.bridge.enabled` 设为 `true` 常开后省略）：
+**5. 经 hil_test 运行**（真实接口用 `-i can0`；桥已在上一步手动起好，脚本不再自动启停桥）：
 
 ```bash
 cd hil_test
-./scripts/hil_test.sh -l L1 -i can0 --bridge      # 链路自检 + 协议一致性（VCU 需在发 0x501）
-./scripts/hil_test.sh -l L2 -i can0 --bridge      # 安全联动（需人工 RES/AMI 配合）
-./scripts/hil_test.sh -l L3 -i can0 --bridge -n   # L3 电机闭环（台架，-n=HIL_BENCH）
+./scripts/hil_test.sh -l L1 -i can0 --no-build      # 链路自检 + 协议一致性（VCU 需在发 0x501）
+./scripts/hil_test.sh -l L2 -i can0 --no-build      # 安全联动（需人工 RES/AMI 配合）
+./scripts/hil_test.sh -l L3 -i can0 -n --no-build   # L3 电机闭环（台架，-n=HIL_BENCH）
 ```
 
-> 桥接模式下 `can0` 缺失时由桥接自动创建；测试结束自动停止桥接；CAN 设备日志（收发统计/掉线重连）自动收进本次批次目录 `logs/latest/bridge.log`（与节点日志统一管理，脚本启动时会打印路径）。真实接口语义与仿真不同：脚本拒绝 `-l L0`（防模拟帧污染真实 VCU），L1 的 0x501 注入用例自动跳过。
-
-> 独立启动时日志写 `zlgcan_bridge/bridge.log`（启动配置、连接各步骤、每 5s 收发统计、掉线重连记录），`tail -f` 实时查看、`grep -E "ERROR|WARN"` 快速定位；完整部署 / 排障详见 `zlgcan_bridge/docs/部署使用说明.md`。
+> 真实接口语义与仿真不同：脚本拒绝 `-l L0`（防模拟帧污染真实 VCU），L1 的 0x501 注入用例自动跳过。
 
 **排查**：
 
-- 桥接启动失败（日志报 `dlopen(libzlgcan.so)` / `ZCAN_OpenDevice`）：SDK 未放入 `lib/` 或与系统架构不一致（x86_64/aarch64）；设备被其他进程占用——**同一 ZLG 设备仅一个进程可打开**，检查是否有前台/后台桥接实例同时在跑（`ps aux | grep zlgcan_bridge`）；
-- VCU 上电后 `candump can0` 抓不到 0x501：先 `start_bridge.sh status` 确认桥接在跑，再查接线 / 波特率（`zlgcan_bridge/config/bridge_config.yaml` 默认 500k，须与 VCU 一致）；
-- 测试提示 `can_interface 未运行` 或心跳超时：看节点日志 `logs/latest/<层级>/can_interface_node.log` 与桥接日志 `logs/latest/bridge.log`。
+- 桥启动失败 `ZCAN_OpenDevice 失败`：驱动未装（`/usr/lib/libusbcan-4e.so` 缺失）/ 未用 sudo / 设备被其他进程占用——**同一 ZLG 设备仅一个进程可打开**（`pgrep -af zlg_can_bridge` 查是否有实例在跑）；
+- VCU 上电后 `candump can0` 抓不到 0x501：先看桥终端的 `VCU->FSD` 计数与 `err`——
+  - `VCU->FSD` 恒为 0 → ZLG 侧没收到：查 VCU 是否上电并在发 0x501、接线（CAN_H/CAN_L、共地）、120Ω 终端电阻、`bridge.yaml` 的 `chn` 与 `baud`；
+  - `err` 持续增长 → ZLG 收发报错（接线/波特率）；若桥先于 VCU 上电启动，持续发送会因无应答累积错误直至 **bus-off**（当前桥无自动恢复），请 Ctrl-C 重启桥（**建议先上电 VCU，再起桥**）；
+- 测试提示 `can_interface 未运行` 或心跳超时：看节点日志 `logs/latest/<层级>/can_interface_node.log`。
 
 ### 步骤 1 · L0 纯仿真验证（无硬件、无 FSD）
 
@@ -226,8 +244,8 @@ cd hil_test && ./scripts/hil_test.sh -l L0 -i vcan0
 # 先在 vcan0 仿真跑通（vcu_sim 自动补 0x501 心跳）
 cd hil_test && ./scripts/hil_test.sh -l L1 -i vcan0
 
-# 再换真实 VCU（ZLG 硬件加 --bridge；需 VCU 已上电并在发 0x501）
-cd hil_test && ./scripts/hil_test.sh -l L1 -i can0 --bridge
+# 再换真实 VCU（先在 zlgcan_bridge 下 sudo ./start_zlg_bridge.sh 起桥；需 VCU 已上电并在发 0x501）
+cd hil_test && ./scripts/hil_test.sh -l L1 -i can0 --no-build
 ```
 
 脚本自动：起 can\_interface（发 0x210 心跳；vcan0 下另起 vcu\_sim 补 0x501）→ 跑 `-m "link or protocol"`（链路 3 + 集成 5）。
@@ -254,7 +272,7 @@ cd hil_test && ./scripts/hil_test.sh -l L1 -i can0 --bridge
 
 ```bash
 cd hil_test && ./scripts/hil_test.sh -l L2 -i vcan0      # 先 vcan0 全自动预演
-cd hil_test && ./scripts/hil_test.sh -l L2 -i can0 --bridge  # 真实 VCU（部分用例需人工）
+cd hil_test && ./scripts/hil_test.sh -l L2 -i can0 --no-build  # 真实 VCU（需先起桥；部分用例需人工）
 ```
 
 脚本自动：起 can\_interface + mission\_manager（自动加载 HIL 覆盖关闭传感器自检）+ controller → 跑 `-m safety`。
@@ -284,7 +302,7 @@ cd hil_test && ./scripts/hil_test.sh -l L2 -i can0 --bridge  # 真实 VCU（部�
 **操作步骤**：
 
 ```bash
-cd hil_test && ./scripts/hil_test.sh -l L3 -i can0 --bridge -n  # ZLG 桥接；-n 台架模式（HIL_BENCH=1）
+cd hil_test && ./scripts/hil_test.sh -l L3 -i can0 -n --no-build  # 需先起桥；-n 台架模式（HIL_BENCH=1）
 ```
 
 脚本自动：起 can\_interface + controller（定位/感知/规划不启动）→ hil\_test 代发位姿 / 车速 / 直路路径 / 就绪信号 → 跑 `-m motor`。
@@ -355,8 +373,8 @@ python -m pytest test/test_safety.py -m safety -q        # L2（需节点 + 真�
 | 创建 vcan0 报 `Operation not permitted` | 无 CAP_NET_ADMIN（容器 / 权限受限） | 换真实开发机或提权运行 |
 | 创建 vcan0 提示 `sudo: a terminal is required` | 非交互终端下 sudo 无法读密码 | 先 `sudo -v` 预授权，或换交互终端 |
 | 集成用例超时（话题收不到） | ROS_DOMAIN_ID 不一致 / 节点未启动 / workspace 未 source | 两端设置相同 `ROS_DOMAIN_ID`；`ros2 node list` 确认节点在线 |
-| 真实接口 0x501 心跳超时 | VCU 未上电 / 波特率不匹配 / 桥接未运行或掉线 | `start_bridge.sh status` 确认桥接在跑；`candump can0` 抓帧；核对 `zlgcan_bridge/config/bridge_config.yaml` 波特率（默认 500k，须与 VCU 一致） |
-| 桥接启动失败（日志报 `dlopen(libzlgcan.so)` / `ZCAN_OpenDevice`） | Linux SDK 未放入 `zlgcan_bridge/lib/` 或与系统架构不符；设备被其他进程占用（同一设备仅一个进程可打开） | `cp /path/to/libzlgcan.so zlgcan_bridge/lib/`（确认 x86_64/aarch64）；`ps aux \| grep zlgcan_bridge` 查是否有前台/后台实例同时在跑（详见部署说明） |
+| 真实接口 0x501 心跳超时 | VCU 未上电 / 波特率不匹配 / 桥未运行或已 bus-off | 看桥终端 `[bridge] ... VCU->FSD:x  (err a/b)`；`candump can0` 抓帧；核对 `zlgcan_bridge/bridge.yaml` 的 `baud`（默认 500k，须与 VCU 一致）与 `chn` |
+| 桥启动失败 `ZCAN_OpenDevice` | `libusbcan-4e.so` 未安装或路径不对；未用 sudo；设备被其他进程占用（同一设备仅一个进程可打开） | `ls -l /usr/lib/libusbcan-4e.so` 确认已装（缺则运行 ZLG 官方安装器）；`pgrep -af zlg_can_bridge` 查是否有实例在跑 |
 | 提示 `can_interface 未运行` | FSD 未编译 / 未 source workspace | 看 `logs/latest/L1/can_interface_node.log`，确认执行过编译 |
 | 编译 FSD 时进程被杀（Killed / OOM） | 全量并行编译内存不足 | 加 `--lite-build` 限制并行编译数为 1 重试 |
 
