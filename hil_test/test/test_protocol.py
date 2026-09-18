@@ -224,11 +224,21 @@ def test_501_mode1_ignored(fsd_ready, protocol, interface, is_sim):
 @pytest.mark.protocol
 @pytest.mark.integration
 def test_210_scaling_from_command(fsd_ready, bus_monitor, protocol):
-    """0x210 透传：注入 /control/command → 总线信号与定标一致."""
-    fsd_ready.publish_command(speed=0.0, angle=12.5, throttle_brake=0.5)
-    assert bus_monitor.wait_for(protocol.tx['id'], timeout=3.0)
-    latest = bus_monitor.latest(protocol.tx['id'])
-    dec = protocol.decode_210(latest[1])
+    """0x210 透传：注入 /control/command → 总线信号与定标一致.
+
+    0x210 为 10Hz 保活，命令生效前的旧帧可能先到总线；
+    故轮询等待携带新定标值的帧，而非「出现任意一帧」即断言。
+    """
     from hil_test.protocol_loader import scale_control
-    assert dec['longitudinal'] == scale_control(0.5)
+    fsd_ready.publish_command(speed=0.0, angle=12.5, throttle_brake=0.5)
+    expect_long = scale_control(0.5)
+
+    def _got_scaled_frame():
+        latest = bus_monitor.latest(protocol.tx['id'])
+        return (latest is not None
+                and protocol.decode_210(latest[1])['longitudinal'] == expect_long)
+
+    assert _wait_until(_got_scaled_frame, 3.0), \
+        f'0x210 纵向未按 throttle_brake 定标: {bus_monitor.latest(protocol.tx["id"])}'
+    dec = protocol.decode_210(bus_monitor.latest(protocol.tx['id'])[1])
     assert dec['lateral'] == scale_control(-12.5 / protocol.max_steer_deg)
