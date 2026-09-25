@@ -5,6 +5,9 @@ can:
   sim_interfaces:        # 仿真接口列表：匹配则自动起 vcu_sim / 允许 0x501 注入
     - vcan0
 
+bench:
+  target_speed_mps: 1.0  # L3/L4 台架代发目标车速（安全限速：车辆架起低速验证，先低后调）
+
 test:
   frames:
     - id: 0x210          # 工控机→VCU 心跳（10Hz 保活）

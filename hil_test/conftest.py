@@ -1,16 +1,19 @@
 """pytest 公共配置：路径、fixtures、markers.
 
 分层 marker：
-  sim      - L0 仿真预跑（vcan 模拟 VCU）
-  unit     - L0 协议编解码单测（无需硬件）
-  link     - L1 链路自检（需 can_interface）
-  protocol - L1 协议一致性集成（需 can_interface）
-  safety   - L2 安全与状态联动
-  motor    - L3 电机闭环（slow）
+  sim        - L0 仿真预跑（vcan 模拟 VCU）
+  unit       - L0 协议编解码单测（无需硬件）
+  link       - L1 链路自检（需 can_interface）
+  protocol   - L1 协议一致性集成（需 can_interface）
+  selfcheck  - L2 传感器自检故障模拟（断电层，mission_manager 默认参数）
+  motor      - L3 低速动态安全闭环：门控/Go/急停（slow，通电层）
+  inspection - L4 车检任务全链路（slow，通电层）
   integration - 依赖 can_interface/FSD 运行，需工控机环境
 """
 
 import os
+import signal
+import subprocess
 import sys
 import time
 
@@ -61,7 +64,8 @@ def _if_up(name):
 
 def pytest_configure(config):
     """注册分层 markers."""
-    for marker in ('sim', 'unit', 'link', 'protocol', 'safety', 'motor', 'integration', 'slow'):
+    for marker in ('sim', 'unit', 'link', 'protocol', 'selfcheck', 'motor',
+                   'inspection', 'integration', 'slow'):
         config.addinivalue_line('markers', marker)
 
 
@@ -93,6 +97,12 @@ def can_ready(interface):
 
 
 @pytest.fixture
+def bench_speed():
+    """L3/L4 台架代发目标车速（hil_test.yaml bench.target_speed_mps，安全限速）."""
+    return float(_load_config().get('bench', {}).get('target_speed_mps', 1.0))
+
+
+@pytest.fixture
 def bus_monitor(interface, tmp_path):
     """被动总线监听器（集成用例用）."""
     from hil_test.bus_monitor import BusMonitor
@@ -119,9 +129,9 @@ def ros():
     """ROS2 注入/断言器；环境缺失则跳过."""
     try:
         from hil_test.ros_injector import RosInjector
+        inj = RosInjector()
     except RuntimeError as e:
         pytest.skip(str(e))
-    inj = RosInjector()
     yield inj
     inj.destroy()
 
@@ -136,6 +146,58 @@ def fsd_ready(ros):
             return ros
         time.sleep(0.2)
     pytest.skip('can_interface 未运行（先启动 FSD），集成用例跳过')
+
+
+@pytest.fixture
+def mm_factory(fsd_ready, tmp_path):
+    """按用例启动/停止独立 mission_manager 实例，返回 callable(*extra_params).
+
+    以 HIL_MM_PARAMS 为基础，extra_params 逐个追加 `--params-file`（后者覆盖前者）。
+    自管实例的用例（L2 故障锁存 / L4 状态机终态）需用完即停以获得干净状态机。
+    """
+    params = os.environ.get('HIL_MM_PARAMS')
+    if not params:
+        pytest.skip('缺少 HIL_MM_PARAMS（请用 hil_test.sh 启动）')
+    procs = []
+
+    def _start(*extra_params):
+        cmd = ['ros2', 'run', 'mission_manager', 'mission_manager_node',
+               '--ros-args', '--params-file', params]
+        for p in extra_params:
+            cmd += ['--params-file', p]
+        log_path = os.path.join(str(tmp_path), 'mission_manager.log')
+        with open(log_path, 'wb') as log:
+            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+        procs.append(proc)
+        # 等待节点出现在 ROS 图中（DDS 发现可能滞后）
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            fsd_ready.spin_once()
+            if 'mission_manager' in fsd_ready.graph_nodes():
+                return proc
+            if proc.poll() is not None:
+                pytest.skip(f'mission_manager 启动失败，日志: {log_path}')
+            time.sleep(0.2)
+        pytest.skip('mission_manager 节点未就绪')
+
+    yield _start
+
+    for proc in procs:
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        proc.wait(timeout=5.0)
+    time.sleep(0.5)  # 等 DDS 摘除旧实例，避免同名节点残留
 
 
 @pytest.fixture

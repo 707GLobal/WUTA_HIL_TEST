@@ -1,18 +1,38 @@
 """rclpy 进程内 ROS 注入与断言.
 
 发布 FSD 输入话题（/control/command、/system/mission_state、/system/devices_inspection、
-/system/mission_complete、/chcnav/velocity 台架车速源），订阅 can_interface 输出话题
-（/system/start_command、/system/emergency、/system/mission_mode_cmd）供断言。
+/system/mission_complete、/chcnav/velocity 台架车速源、传感器数据心跳），订阅
+can_interface/mission_manager 输出话题（/system/start_command、/system/emergency、
+/system/mission_mode_cmd、/system/mission_state、/system/devices_inspection）供断言。
 
 HIL 台架模式代发（车辆架起，传感器仅保在线）：
   /system/lidar_ready、/system/localization_ready、/localization/pose、
   /planning/final_waypoints（直路）——由本类代发，保证 FSD 正常在线。
 
+L2 传感器自检心跳（仅刷新 mission_manager 数据在线时间戳，内容无关）：
+  /hesai/pandar、/chcnav/odometry、/zed2i/zed_node/left/image_rect_color。
+
 需在 source 了 FSD workspace（install/setup.bash）的 ROS2 环境中运行。
 """
 
 import math
+import os
 import time
+
+_CONFIG_DIR = os.environ.get(
+    'HIL_CONFIG',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), 'config'))
+
+
+def _bench_target_speed():
+    """读取 hil_test.yaml bench.target_speed_mps（缺省 1.0 m/s 安全限速）."""
+    try:
+        import yaml
+        with open(os.path.join(_CONFIG_DIR, 'hil_test.yaml'), 'r', encoding='utf-8') as f:
+            return float(yaml.safe_load(f).get('bench', {}).get('target_speed_mps', 1.0))
+    except (OSError, ValueError, TypeError):
+        return 1.0
 
 
 class RosInjector:
@@ -26,6 +46,8 @@ class RosInjector:
             from wuta_msgs.msg import MissionState, DevicesInspection
             from geometry_msgs.msg import PoseStamped, TwistStamped
             from std_msgs.msg import Bool, String
+            from sensor_msgs.msg import PointCloud2, Image
+            from nav_msgs.msg import Odometry
         except ImportError as e:
             raise RuntimeError(
                 'ROS2 环境不可用（需 source FSD workspace 后运行）: %s' % e) from e
@@ -39,6 +61,9 @@ class RosInjector:
         self._TwistStamped = TwistStamped
         self._Bool = Bool
         self._String = String
+        self._PointCloud2 = PointCloud2
+        self._Image = Image
+        self._Odometry = Odometry
 
         if not rclpy.ok():
             rclpy.init()
@@ -63,6 +88,13 @@ class RosInjector:
             PoseStamped, '/localization/pose', 10)
         self._pub_waypoints = self._node.create_publisher(
             Lane, '/planning/final_waypoints', 10)
+        # L2 传感器数据心跳（mission_manager selfCheckTick 在线判定源）
+        self._pub_lidar_data = self._node.create_publisher(
+            PointCloud2, '/hesai/pandar', 10)
+        self._pub_imu_data = self._node.create_publisher(
+            Odometry, '/chcnav/odometry', 10)
+        self._pub_camera_data = self._node.create_publisher(
+            Image, '/zed2i/zed_node/left/image_rect_color', 10)
 
         # 断言订阅器
         self._node.create_subscription(
@@ -77,6 +109,10 @@ class RosInjector:
         self._node.create_subscription(
             MissionState, '/system/mission_state',
             lambda m: self._on('/system/mission_state', m.state), 10)
+        self._node.create_subscription(
+            DevicesInspection, '/system/devices_inspection',
+            lambda m: self._on('/system/devices_inspection',
+                               (bool(m.ok), tuple(m.failures))), 10)
 
         time.sleep(1.0)  # 等 DDS 发现完成
 
@@ -124,6 +160,28 @@ class RosInjector:
         msg.data = True
         self._pub_complete.publish(msg)
 
+    # ---- L2 传感器数据心跳（内容无关，仅刷新在线时间戳） ----
+    def publish_lidar_data(self):
+        """发布 /hesai/pandar 空点云（刷新 lidar 心跳）."""
+        msg = self._PointCloud2()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        self._pub_lidar_data.publish(msg)
+
+    def publish_imu_data(self):
+        """发布 /chcnav/odometry 空里程计（刷新 imu 心跳）."""
+        msg = self._Odometry()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        self._pub_imu_data.publish(msg)
+
+    def publish_camera_data(self):
+        """发布 /zed2i/.../image_rect_color 空图像（刷新 camera 心跳）."""
+        msg = self._Image()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.header.frame_id = 'camera'
+        self._pub_camera_data.publish(msg)
+
     # ---- HIL 台架代发（传感器仅保在线） ----
     def publish_lidar_ready(self, ready=True):
         """代发 /system/lidar_ready（IDLE→READY 门控）."""
@@ -148,8 +206,10 @@ class RosInjector:
         msg.pose.orientation.w = math.cos(float(yaw) / 2.0)
         self._pub_pose.publish(msg)
 
-    def publish_waypoints_straight(self, length=10.0, step=1.0, speed=2.0):
-        """代发 /planning/final_waypoints：原点沿 x 轴直路."""
+    def publish_waypoints_straight(self, length=10.0, step=1.0, speed=None):
+        """代发 /planning/final_waypoints：原点沿 x 轴直路（speed 缺省取 bench 限速）."""
+        if speed is None:
+            speed = _bench_target_speed()
         lane = self._Lane()
         lane.header.stamp = self._node.get_clock().now().to_msg()
         lane.header.frame_id = 'map'

@@ -1,4 +1,11 @@
-"""分层执行入口：--level L0 / L1 / L2 / L3.
+"""分层执行入口：--level L0 / L1 / L2 / L3 / L4.
+
+五层测试框架：
+  L0 纯仿真（sim/unit，vcan 模拟 VCU，无 FSD）
+  L1 链路 + 协议通畅（link/protocol，需 can_interface）
+  L2 传感器自检故障模拟（selfcheck，故障即切 EMERGENCY，断电层）
+  L3 低速动态安全闭环（motor：AMI 直线加速 + RES Go 放行 + RES 急停，通电层）
+  L4 车检任务全链路（inspection：AMI 直选车检模式，通电层）
 
 用法：
   source /opt/ros/humble/setup.bash
@@ -6,7 +13,8 @@
   python scripts/run_hil.py --level L0 --interface vcan0
   python scripts/run_hil.py --level L1 --interface vcan0
   python scripts/run_hil.py --level L2 --interface can0
-  python scripts/run_hil.py --level L3 --interface can0
+  python scripts/run_hil.py --level L3 --interface can0   # 真实台架需 HIL_BENCH=1
+  python scripts/run_hil.py --level L4 --interface can0   # 真实台架需 HIL_BENCH=1
 
 pytest 完整输出（--tb=long 含回溯）直接打到终端，不生成报告/日志文件。
 """
@@ -39,8 +47,9 @@ def _is_sim_interface(interface):
 LEVELS = {
     'L0': ('test_protocol.py', 'sim or unit'),   # 纯仿真验证（无 FSD）
     'L1': ('test_protocol.py', 'link or protocol'),  # 链路自检 + 协议一致性（需 FSD）
-    'L2': ('test_safety.py', 'safety'),
-    'L3': ('test_motor_hil.py', 'motor'),
+    'L2': ('test_selfcheck.py', 'selfcheck'),    # 传感器自检故障模拟（断电层）
+    'L3': ('test_drive_hil.py', 'motor'),        # 低速动态安全闭环（通电层）
+    'L4': ('test_inspection.py', 'inspection'),  # 车检任务全链路（通电层）
 }
 
 

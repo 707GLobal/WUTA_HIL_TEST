@@ -4,8 +4,8 @@
 # 用法:
 #   ./scripts/hil_test.sh                     # 交互: 编译 → 选链路 → 跑 → 出结果
 #   ./scripts/hil_test.sh -l L1 -i vcan0      # 直接指定链路与接口
-#   ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线: L0→L1→L2 连跑(失败即停)
-#   ./scripts/hil_test.sh -l L3 -i can0 -n    # L3 台架模式
+#   ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线: L0→L1→L2→L3 连跑(失败即停)
+#   ./scripts/hil_test.sh -l L3 -i can0 -n    # L3/L4 台架模式（HIL_BENCH=1）
 #   ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
 # 真实 ZLG USB-CAN：先在 zlgcan_bridge 下运行 sudo ./start_zlg_bridge.sh 起桥，再用 -i can0
 set -euo pipefail
@@ -31,7 +31,7 @@ usage() {
   cat <<EOF
 用法: $(basename "$0") [选项]
 
-  -l, --level <L0|L1|L2|L3|all>     测试链路（缺省交互选择；all=流水线连跑）
+  -l, --level <L0|L1|L2|L3|L4|all>  测试层级（缺省交互选择；all=流水线连跑）
   -i, --interface <接口名>          CAN 接口（缺省 vcan0；真实 USB-CAN 按实际名称，如 can0/can1）
   -m, --mode <sim|real>            sim=仿真(vcan) / real=真实接口（缺省按接口名自动推断）
   -b, --build                       编译 FSD（默认开启）
@@ -40,7 +40,7 @@ usage() {
   -p, --build-packages <pkgs>       只编译指定包（空格分隔；缺省全量）
       --lite-build                  Lite 编译：并行编译数限制为 1（内存受限防 OOM）
   -k, --keep-nodes                  测试后保留 FSD 节点（便于调试）
-  -n, --bench                       L3 台架模式（HIL_BENCH=1）
+  -n, --bench                       L3/L4 台架模式（HIL_BENCH=1，车辆通电）
   -h, --help                        帮助
 EOF
 }
@@ -72,22 +72,23 @@ if [ -z "$MODE" ]; then
 fi
 case "$MODE" in sim|real) ;; *) echo "!! 非法 mode: $MODE" >&2; exit 1 ;; esac
 
-# ---- 链路合法性校验 / 交互选择 ----
+# ---- 层级合法性校验 / 交互选择 ----
 valid_level() {
-  case "$1" in L0|L1|L2|L3|all) return 0 ;; *) return 1 ;; esac
+  case "$1" in L0|L1|L2|L3|L4|all) return 0 ;; *) return 1 ;; esac
 }
 
 if [ -z "$LEVEL" ]; then
-  echo "选择测试链路:"
-  echo "  all)   流水线连跑 (L0→L1→L2, 失败即停)"
+  echo "选择测试层级（五层框架）:"
+  echo "  all)   流水线连跑 (L0→L1→L2→L3, 失败即停)"
   echo "  L0)    纯仿真验证 (vcan0, 无 FSD, 协议单测+VCU 模拟)"
-  echo "  L1)    链路自检 + 协议一致性"
-  echo "  L2)    安全与状态联动"
-  echo "  L3)    电机闭环 (需台架)"
-  read -rp "输入 [all/L0/L1/L2/L3]: " LEVEL
+  echo "  L1)    链路 + 协议通畅"
+  echo "  L2)    传感器自检故障模拟 (故障即切 EMERGENCY, 断电层)"
+  echo "  L3)    低速动态安全闭环 (AMI直线加速+RES Go+RES急停, 需台架 -n)"
+  echo "  L4)    车检任务全链路 (AMI直选车检, 需台架 -n)"
+  read -rp "输入 [all/L0/L1/L2/L3/L4]: " LEVEL
 fi
 if ! valid_level "$LEVEL"; then
-  echo "!! 非法链路: $LEVEL" >&2; exit 1
+  echo "!! 非法层级: $LEVEL" >&2; exit 1
 fi
 
 # ---- 环境 ----
@@ -212,7 +213,10 @@ CTRL_PARAMS="$FSD_WS/src/control/controller/config/controller.yaml"
 MM_PARAMS="$FSD_WS/src/system/mission_manager/config/mission_manager.yaml"
 MM_HIL_PARAMS="$HIL_CFG/hil_fsd/mission_manager.yaml"
 
-# ---- 按链路启动 FSD 节点 ----
+# ---- 按层级启动 FSD 节点 ----
+# L2 传感器自检 / L4 车检：仅起 can_interface（+L4 controller）；mission_manager
+# 由测试用例自管（L2 故障锁存、L4 状态机终态均需干净实例，用例用完即停）
+# L3 低速动态：can_interface + mission_manager(HIL 覆盖禁自检) + controller
 start_level_nodes() {
   local level="$1"
   case "$level" in
@@ -235,13 +239,18 @@ start_level_nodes() {
     L2)
       start_node can_interface can_interface_node \
         --ros-args --params-file "$CAN_PARAMS" -p can_device:="$INTERFACE"
+      wait_node_ready can_interface
+      ;;
+    L3)
+      start_node can_interface can_interface_node \
+        --ros-args --params-file "$CAN_PARAMS" -p can_device:="$INTERFACE"
       start_node mission_manager mission_manager_node \
         --ros-args --params-file "$MM_PARAMS" --params-file "$MM_HIL_PARAMS"
       start_node controller controller_node \
         --ros-args --params-file "$CTRL_PARAMS"
       wait_node_ready can_interface
       ;;
-    L3)
+    L4)
       start_node can_interface can_interface_node \
         --ros-args --params-file "$CAN_PARAMS" -p can_device:="$INTERFACE"
       start_node controller controller_node \
@@ -261,6 +270,8 @@ run_level() {
   start_level_nodes "$level"
   export HIL_INTERFACE="$INTERFACE"
   export HIL_CONFIG="$HIL_CFG"
+  export HIL_MM_PARAMS="$MM_PARAMS"        # L2/L4 用例自管 mission_manager 用
+  export HIL_MM_HIL_PARAMS="$MM_HIL_PARAMS"
   if [ "$BENCH" -eq 1 ]; then
     export HIL_BENCH=1
   fi
@@ -284,10 +295,13 @@ fi
 TEST_RC=0
 if [ "$LEVEL" = "all" ]; then
   if [ "$MODE" = "sim" ]; then
-    LEVELS_RUN="L0 L1 L2"
+    LEVELS_RUN="L0 L1 L2 L3"
   else
     LEVELS_RUN="L1"
-    echo "!! all(real): L2 需人工配合真实 VCU（RES/AMI），请单独运行: ./scripts/hil_test.sh -l L2 -i $INTERFACE"
+    echo "!! all(real): L2 需 mission_manager 自管 / L3、L4 需真实台架通电（-n），请单独运行:" >&2
+    echo "   ./scripts/hil_test.sh -l L2 -i $INTERFACE" >&2
+    echo "   ./scripts/hil_test.sh -l L3 -i $INTERFACE -n" >&2
+    echo "   ./scripts/hil_test.sh -l L4 -i $INTERFACE -n" >&2
   fi
   for lv in $LEVELS_RUN; do
     if ! run_level "$lv"; then
