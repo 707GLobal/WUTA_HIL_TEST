@@ -97,12 +97,6 @@ def can_ready(interface):
 
 
 @pytest.fixture
-def bench_speed():
-    """L3/L4 台架代发目标车速（hil_test.yaml bench.target_speed_mps，安全限速）."""
-    return float(_load_config().get('bench', {}).get('target_speed_mps', 1.0))
-
-
-@pytest.fixture
 def bus_monitor(interface, tmp_path):
     """被动总线监听器（集成用例用）."""
     from hil_test.bus_monitor import BusMonitor

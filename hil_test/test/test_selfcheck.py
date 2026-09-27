@@ -46,6 +46,16 @@ def _hold(inj, duration):
         time.sleep(0.1)
 
 
+def _wait_until(predicate, timeout):
+    """轮询等待条件成立（0x210 为 10Hz 保活，须等新值帧而非「出现任意帧」）."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
 @pytest.mark.integration
 def test_selfcheck_all_pass(mm_factory, fsd_ready):
     """自检通过：三传感器持续在线 → ok=true，状态保持 IDLE 不误报."""
@@ -68,9 +78,17 @@ def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol):
     assert fsd_ready.wait_for('/system/mission_state', STATE_EMERGENCY, timeout=3.0), \
         '自检失败后未立即切 EMERGENCY'
     # VCU 通知链路：can_interface 将 Signal3（Byte5）置 0
+    # 注意：mission_manager 先切 EMERGENCY 再发自检结果，故 EMERGENCY 后仍可能
+    # 先出现携带 Signal3=1 的帧，需轮询等待置 0 的那一帧，而非取当前最新帧。
     assert bus_monitor.wait_for(protocol.tx['id'], timeout=3.0)
-    dec = protocol.decode_210(bus_monitor.latest(protocol.tx['id'])[1])
-    assert dec['online'] == 0, '自检失败后 0x210 Signal3 未置 0（VCU 不会切 EMERGENCY）'
+
+    def _signal3_off():
+        latest = bus_monitor.latest(protocol.tx['id'])
+        return (latest is not None
+                and protocol.decode_210(latest[1])['online'] == 0)
+
+    assert _wait_until(_signal3_off, 1.0), \
+        '自检失败后 0x210 Signal3 未置 0（VCU 不会切 EMERGENCY）'
 
 
 @pytest.mark.integration

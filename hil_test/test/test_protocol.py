@@ -99,12 +99,22 @@ def test_mode_topic_map(protocol):
 # ================= L0 仿真预跑（vcan + vcu_sim） =================
 
 @pytest.mark.sim
-def test_sim_501_heartbeat(vcu_sim, bus_monitor, protocol):
-    """VCU 模拟：0x501 10Hz 稳定周期 ≈100ms."""
+def test_sim_501_event(vcu_sim, bus_monitor, protocol):
+    """VCU 模拟：状态/模式变化时发帧（事件驱动，无周期心跳）."""
     assert bus_monitor.wait_for(protocol.rx['id'], timeout=3.0)
-    time.sleep(1.2)
-    stats = bus_monitor.period_stats(protocol.rx['id'])
-    assert stats is not None and 0.06 <= stats['avg'] <= 0.14
+
+    def _mode_is(mode):
+        frame = bus_monitor.latest(protocol.rx['id'])
+        return frame is not None and frame[1][protocol.rx['mode_byte']] == mode
+
+    def _state_is(state):
+        frame = bus_monitor.latest(protocol.rx['id'])
+        return frame is not None and frame[1][protocol.rx['state_byte']] == state
+
+    vcu_sim.set_mode(3)
+    assert _wait_until(lambda: _mode_is(3), 2.0), '模式变化后未收到 0x501'
+    vcu_sim.set_emergency(True)
+    assert _wait_until(lambda: _state_is(12), 2.0), '状态变化后未收到 0x501'
 
 
 @pytest.mark.sim
@@ -161,16 +171,6 @@ def test_link_210_heartbeat(fsd_ready, bus_monitor, protocol):
     assert bus_monitor.wait_for(protocol.tx['id'], timeout=3.0)
     time.sleep(1.1)
     stats = bus_monitor.period_stats(protocol.tx['id'])
-    assert stats is not None and 0.06 <= stats['avg'] <= 0.14
-
-
-@pytest.mark.link
-@pytest.mark.integration
-def test_link_501_heartbeat(fsd_ready, bus_monitor, protocol):
-    """VCU→工控机心跳：0x501 10Hz."""
-    assert bus_monitor.wait_for(protocol.rx['id'], timeout=3.0)
-    time.sleep(1.1)
-    stats = bus_monitor.period_stats(protocol.rx['id'])
     assert stats is not None and 0.06 <= stats['avg'] <= 0.14
 
 

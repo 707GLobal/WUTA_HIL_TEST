@@ -4,7 +4,7 @@
   L0 纯仿真（sim/unit，vcan 模拟 VCU，无 FSD）
   L1 链路 + 协议通畅（link/protocol，需 can_interface）
   L2 传感器自检故障模拟（selfcheck，故障即切 EMERGENCY，断电层）
-  L3 低速动态安全闭环（motor：AMI 直线加速 + RES Go 放行 + RES 急停，通电层）
+  L3 AMI 模式选择与放行 + RES 急停（motor：AMI 选直线加速 + RES Go → EXPLORE → 急停 EMERGENCY，通电层）
   L4 车检任务全链路（inspection：AMI 直选车检模式，通电层）
 
 用法：
@@ -48,7 +48,7 @@ LEVELS = {
     'L0': ('test_protocol.py', 'sim or unit'),   # 纯仿真验证（无 FSD）
     'L1': ('test_protocol.py', 'link or protocol'),  # 链路自检 + 协议一致性（需 FSD）
     'L2': ('test_selfcheck.py', 'selfcheck'),    # 传感器自检故障模拟（断电层）
-    'L3': ('test_drive_hil.py', 'motor'),        # 低速动态安全闭环（通电层）
+    'L3': ('test_drive_hil.py', 'motor'),        # AMI 模式选择与放行 + RES 急停（通电层）
     'L4': ('test_inspection.py', 'inspection'),  # 车检任务全链路（通电层）
 }
 

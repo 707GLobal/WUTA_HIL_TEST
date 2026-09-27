@@ -42,7 +42,7 @@ HIL 使用\*\*真实 VCU（整车控制器）\*\*直接连接工控机：
 | 方向        | 报文 ID | 周期      | 内容                                                                                                                                                                    |
 | --------- | ----- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 工控机 → VCU | 0x210 | 10Hz 保活 | Byte1-2 Signal1 纵向（10\~65525，32767=零，<32767 制动、>32767 驱动）；Byte3-4 Signal2 横向（10\~65525，32767 中心，10=左、65525=右）；Byte5 Signal3 工控机上线（1=正常）；Byte6 Signal4 任务已完成；Byte7-8 空 |
-| VCU → 工控机 | 0x501 | 10Hz    | Byte1 VCU 状态（0 静默 / 1\~5 有人 / 6\~11 无人 / 12 EMERGENCY）；Byte2 测试模式（1 操控性=有人，忽略 / 2 直线加速 / 3 高速循迹 / 4 八字绕环 / 5 EBS / 6 车检）；Byte3-8 空                                    |
+| VCU → 工控机 | 0x501 | —（事件驱动） | Byte1 VCU 状态（0 静默 / 1\~5 有人 / 6\~11 无人 / 12 EMERGENCY）；Byte2 测试模式（1 操控性=有人，忽略 / 2 直线加速 / 3 高速循迹 / 4 八字绕环 / 5 EBS / 6 车检）；Byte3-8 空                                    |
 
 详细信号位与定标以《26赛季 VCU - 工控机 CAN通信协议规划.md》为准，测试配置镜像到 `hil_test/config/protocol.yaml`。
 
@@ -76,7 +76,7 @@ HIL 台架测试时车辆架起不动，相机 / 激光雷达 / 华测等传感�
 FSD 侧配套（HIL 专用配置，默认配置不变）：
 
 - mission_manager 传感器自检全部关闭（`config/hil_fsd/mission_manager.yaml` 参数覆盖，否则华测未接 → 自检超时锁死 EMERGENCY）；
-- L3 台架运行子集：can\_interface + mission\_manager（HIL 覆盖）+ controller；L4 只起 can\_interface + controller，mission\_manager 由用例逐条自起自停（HIL 覆盖）（定位/感知/规划不启动）；`publish_waypoints_straight()` 的目标速度取 `hil_test.yaml` 的 `bench.target_speed_mps`（默认 1.0 m/s 安全低速）。
+- L3 台架运行子集：can\_interface + mission\_manager（HIL 覆盖）；L4 只起 can\_interface + controller，mission\_manager 由用例逐条自起自停（HIL 覆盖）（定位/感知/规划不启动）；`publish_waypoints_straight()` 的目标速度取 `hil_test.yaml` 的 `bench.target_speed_mps`（默认 1.0 m/s 安全低速）。
 
 ## 3. 分层测试框架（由浅入深）
 
@@ -87,7 +87,7 @@ FSD 侧配套（HIL 专用配置，默认配置不变）：
 | L0 | 纯仿真：协议编解码 + vcu\_sim 状态机                                             | vcan0        | 无                                 |
 | L1 | 链路 + 协议通畅：心跳 / 0x501→话题 / 0x210 定标透传                                | vcan0 或 can0 | 无                                 |
 | L2 | 传感器自检故障模拟：缺失 / 断流 → 立即切 EMERGENCY（断电层）                               | vcan0 或 can0 | 无（全自动）                            |
-| L3 | 低速动态安全闭环：门控 / AMI 直线加速 + RES Go / RES 急停（通电层）                        | can0 + 台架    | AMI 选模式、RES Go、RES 急停             |
+| L3 | AMI 模式选择与放行 + RES 急停：选直线加速（模式 2）+ RES Go → EXPLORE → 急停 EMERGENCY（通电层） | can0 + VCU    | AMI 选模式、RES Go、RES 急停              |
 | L4 | 车检任务全链路：AMI 直选车检 → 27s 完成链（通电层）                                      | can0 + 台架    | AMI 选车检（急停用例另需 RES 急停）            |
 
 ### L0 纯仿真验证（开发机 vcan）
@@ -98,7 +98,7 @@ FSD 侧配套（HIL 专用配置，默认配置不变）：
 | ------- | ------------------------------------------------ | ---------------------------------------------------- |
 | 协议编解码单测 | protocol_loader 单测（定标/字节序/钳位/模式映射）              | 与 protocol.yaml 配置一致                                 |
 | vcan 链路 | `ip link add vcan0 type vcan` + up               | 接口 up，can_interface 可打开                             |
-| VCU 模拟  | `vcu_sim.py` 周期发 0x501（10Hz），状态可脚本切换             | 0x501 稳定到达，周期 100ms ± 容忍                             |
+| VCU 模拟  | `vcu_sim.py` 事件驱动发 0x501，状态/模式变化即发，状态可脚本切换 | 状态/模式变化后 0x501 到达且字节正确（不判周期） |
 | 状态联动    | 脚本切状态 10 / 12 / 模式 Byte2                         | start_command / emergency / mission_mode_cmd 话题正确 |
 
 > L0 仅限仿真接口（`sim_interfaces`），对真实接口运行会报错退出（防模拟帧污染真实 VCU）。
@@ -112,7 +112,7 @@ FSD 侧配套（HIL 专用配置，默认配置不变）：
 | CAN 接口     | `ip link set can0 up type can bitrate 500000` | 接口 up，无报错                                     |
 | 节点上线       | 启动 can_interface                             | 日志显示 device opened、Tx 0x210 / Rx 0x501 active |
 | 工控机→VCU 心跳 | 监听 0x210                                      | 每 100ms 稳定一帧，DLC=8                            |
-| VCU→工控机心跳  | 监听 0x501                                      | 每 100ms 稳定一帧，DLC=8，Byte1/Byte2 有效             |
+| VCU→工控机状态帧 | 监听 0x501（事件驱动，无固定周期）                          | 状态/模式变化时到达，DLC=8，Byte1/Byte2 有效                |
 | fail-safe  | 断开 VCU / 接口 down 后重启节点                        | 日志告警且 0x210 无任何非零控制量（Signal1/2=32767）         |
 
 协议一致性（配置驱动）：
@@ -149,13 +149,13 @@ FSD 侧配套（HIL 专用配置，默认配置不变）：
 | 故障锁存     | EMERGENCY 后恢复数据流                       | 状态与上报保持失败，不得解除（sensor\_fault\_ 不可恢复）                                     |
 | HIL 覆盖回归 | check\_\* 全关（hil\_fsd 覆盖）下静置 6s        | 不误切 EMERGENCY、不上报（保证 L3/L4 台架配置可用）                                       |
 
-### L3 低速动态安全闭环（真实 VCU + 台架，通电层）
+### L3 AMI 模式选择与放行 + RES 急停（真实 VCU，通电层）
 
-- 台架通电，车辆架起，传感器仅保在线：位姿 / 车速 / 路径 / 就绪信号由 hil\_test 代发（§2.3），FSD 运行子集为 can\_interface + mission\_manager（HIL 覆盖）+ controller；
-- **目标车速由 `hil_test.yaml` 的 `bench.target_speed_mps` 限制（默认 1.0 m/s 安全低速，先低后调）**；
-- 依次验证：启动门控（未放行恒零输出）→ **AMI 选直线加速（模式 2）+ RES Go 放行** → 低速驱动 / 加减速斜坡 → **RES 急停**；
-- 指标：Go 前 0x210 恒零输出（32767）、低速驱动开度出现、斜坡跟随并收敛回零、**RES 急停后 1s 内 0x210 清零**；
-- 注意事项：先跑 L1/L2（断电层）再给台架通电；真实台架人工操作 AMI 与 RES。
+- 职责：确认 AMI 选择对应任务模式后系统可正常执行，并覆盖 RES 急停——READY(1) → mission\_mode\_cmd=acceleration → RES Go 放行 → EXPLORE(3) → RES 急停 → EMERGENCY(7)；**本层只验证放行链路与急停信号链/状态迁移，不做动态闭环验证**（低速驱动 / 加减速 / 0x210 清零计时由 L4 动态层级覆盖）；
+- FSD 运行子集为 can\_interface + mission\_manager（HIL 覆盖）；就绪信号（位姿 / 就绪 / 直路）由 hil\_test 代发（§2.3）；
+- AMI 选模式、RES Go、RES 急停为 VCU 侧真实信号，由**人工操作**（仿真接口下 vcu\_sim 自动驱动）；
+- 指标：收到 AMI 模式 2 后 mission\_mode\_cmd=acceleration；RES Go 后 start\_command=true 且进入 EXPLORE(3)；RES 急停后 /system/emergency=true 且进入 EMERGENCY(7)；
+- 注意事项：先跑 L1/L2（断电层）再接入真实 VCU；AMI 模式须选对，RES Go / RES 急停为 VCU 侧真实信号。两用例按文件顺序执行，急停为终态锁存故置于末位。
 
 ### L4 车检任务全链路（真实 VCU + 台架，通电层）
 
@@ -178,13 +178,13 @@ hil_test/
 │   ├── bus_monitor.py       # 被动监听 CAN 帧 + 日志落盘 + 周期/ID 统计
 │   ├── protocol_loader.py   # 解析 protocol.yaml，编解码统一入口
 │   ├── ros_injector.py      # 注入控制/状态/车速 + 台架代发（pose/ready/waypoints/传感器心跳）
-│   ├── vcu_sim.py           # L0：vcan 模拟 VCU（周期发 0x501，状态可脚本切换；解析 0x210）
+│   ├── vcu_sim.py           # L0：vcan 模拟 VCU（事件驱动发 0x501，状态可脚本切换；解析 0x210）
 │   ├── fault_injector.py    # 可选：CAN 故障注入（急停帧 / 停发），需独立测试通道
 │   └── report.py            # 测试结果汇总，生成 Markdown 报告
 ├── test/
 │   ├── test_protocol.py     # L0/L1 用例（pytest）
 │   ├── test_selfcheck.py    # L2 传感器自检故障模拟（pytest，断电层全自动）
-│   ├── test_drive_hil.py    # L3 低速动态安全闭环（pytest，标记 slow）
+│   ├── test_drive_hil.py    # L3 AMI 模式选择与放行（pytest，标记 slow）
 │   └── test_inspection.py   # L4 车检任务全链路（pytest，标记 slow）
 ├── scripts/
 │   ├── hil_test.sh          # 一键脚本（编译+节点+测试+清理）
@@ -209,37 +209,35 @@ hil_test/
 | M1  | 搭建 `hil_test` 框架：填充 protocol.yaml + bus\_monitor + protocol\_loader + ros\_injector + vcu\_sim + run\_hil | 开发机 vcan0                | vcan0 抓帧正常，编解码配置可解析，vcu\_sim 能模拟 0x501 |
 | M2  | L0 + L1 用例跑通                                                                                        | 开发机 vcan0 / 工控机 + 真实 VCU | 仿真预跑与链路用例绿；协议用例在配置驱动下绿                 |
 | M3  | L2 传感器自检故障模拟（断电层，全自动）                                | 开发机 vcan0 / 工控机 can0     | 缺失 / 断流立即切 EMERGENCY、故障锁存不可解除、HIL 覆盖回归全绿 |
-| M4  | L3 低速动态安全闭环（门控 / AMI 直线加速 + Go / RES 急停）              | 工控机 + VCU + 电机台架         | 台架通电后：门控零输出、低速驱动（限速 1.0 m/s）、急停 1s 清零    |
+| M4  | L3 AMI 模式选择与放行 + RES 急停（选直线加速 + RES Go → EXPLORE → 急停 EMERGENCY）              | 工控机 + 真实 VCU         | AMI 选中直线加速 → mission\_mode\_cmd=acceleration；RES Go → start\_command=true 且进 EXPLORE；RES 急停 → EMERGENCY(7)    |
 | M5  | L4 车检任务全链路（AMI 直选车检）                                  | 工控机 + VCU + 电机台架         | 27s 完成链（FINISH + finished=1）；车检中急停清零     |
 
 关键前置项：
 
 - `protocol.yaml` 按 0x210/0x501 定稿协议填充（§4），测试代码无需改动；
 - can\_interface 收发编码**已实现**（0x210 发送、0x501 解析、GO/EMERGENCY 1Hz 保活），HIL 测试可直接依赖；
-- HIL 台架模式：mission_manager 加载 `hil_fsd/mission_manager.yaml` 关闭传感器自检（§2.3）；L3 运行子集 can\_interface + mission\_manager（HIL 覆盖）+ controller，L4 只起 can\_interface + controller（mission\_manager 由用例逐条自起自停），hil\_test 代发位姿/车速/路径/就绪信号；
-- 待开发：can\_interface **VCU 失联检测**（0x501 超时 → 设备自检失败路径 + 错误日志，支撑 L3 看门狗用例）；
+- HIL 台架模式：mission_manager 加载 `hil_fsd/mission_manager.yaml` 关闭传感器自检（§2.3）；L3 运行子集 can\_interface + mission\_manager（HIL 覆盖），L4 只起 can\_interface + controller（mission\_manager 由用例逐条自起自停），hil\_test 代发位姿/车速/路径/就绪信号；
 - 工控机安装 pytest、PyYAML，确认 USB-CAN 适配器驱动与 `can0` 名称；
 - VCU 上电联调：确认 AMI / RES / 安全回路接线与信号极性符合协议。
 
 ## 6. 台架安全注意事项
 
 - 台架通电前必须先通过 L1 与 L2 全部用例（L2 传感器自检故障模拟，全自动），确保故障方向收敛为"零输出"；
-- 首次通电使用低速 / 低力矩档位（L3/L4 目标速度由 `bench.target_speed_mps` 限制，默认 1.0 m/s，调高前确认台架安全），人工急停开关（RES）常备；
+- 首次通电使用低速 / 低力矩档位（L4 目标速度由 `bench.target_speed_mps` 限制，默认 1.0 m/s，调高前确认台架安全），人工急停开关（RES）常备；
 - 电机台架加机械限位与过流保护，编码器断线 / VCU 断线按急停处理；
-- 看门狗超时按 SCS 要求（规则第四章 2.1）强制置急停，禁止残留使能；VCU 失联超时阈值建议 1s，最终以 VCU 侧为准；
+- 看门狗超时按 SCS 要求（规则第四章 2.1）强制置急停，禁止残留使能；
 - 测试期间任何时刻人工急停应优先于所有软件逻辑。
 
 ## 7. 待确认事项
 
-- **VCU 驱动协议**：电机转速 / 电流指令格式、编码器 / 车速反馈报文（L3 依赖，影响 hil\_test 发布 `/chcnav/velocity` 的数据来源）；
+- **VCU 驱动协议**：电机转速 / 电流指令格式、编码器 / 车速反馈报文（L4 依赖，影响 hil\_test 发布 `/chcnav/velocity` 的数据来源）；
 - **AMI / RES 在 VCU 侧的电气定义与操作方式**（按键 / 开关 / 调试口）；
-- **VCU 失联超时阈值与行为**：can\_interface 看门狗（0x501 超时）的阈值与设备自检失败路径的实施方式。
 
-已定稿无需再确认：0x210 / 0x501 报文 ID、信号位、定标、周期（10Hz）。
+已定稿无需再确认：0x210 / 0x501 报文 ID、信号位、定标；0x210 保活周期 10Hz。**0x501 为事件驱动、无固定周期**（原"10Hz 心跳"系测试侧假定，与源协议不符，已修正）。
 
 ## 8. 文档同步
 
-- 新增话题（如 VCU 失联状态）后同步 `docs/ROS_INTERFACE.md`（若建立）；
+- 新增话题后同步 `docs/ROS_INTERFACE.md`（若建立）；
 - `hil_test/config/protocol.yaml` 与《26赛季 VCU - 工控机 CAN通信协议规划.md》保持一致；
 - 车检完成信号以 `/system/mission_complete` → 0x210 Byte6 为准（controller 上报，非独立 CAN 报文）。
 

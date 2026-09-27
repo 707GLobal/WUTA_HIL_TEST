@@ -1,4 +1,4 @@
-"""L0 仿真预跑：vcan 模拟 VCU（周期发 0x501，状态可脚本切换；解析 0x210）."""
+"""L0 仿真预跑：vcan 模拟 VCU（事件驱动发 0x501，状态可脚本切换；解析 0x210）."""
 
 import sys
 import threading
@@ -11,7 +11,8 @@ from hil_test.protocol_loader import Protocol
 class VcuSim:
     """模拟 VCU 行为：
 
-    - 10Hz 周期发 0x501（Byte1=状态、Byte2=测试模式）；
+    - 事件驱动发 0x501（Byte1=状态、Byte2=测试模式）：仅在状态/模式变化时发帧；
+      真实 VCU 无周期心跳，故默认不做周期广播（period_ms=0）；
     - 解析 0x210，收到 Signal3 上线(1) 后状态由 6（等待高压）自动推进到 9（无人待命）；
     - 脚本可 request_go / set_emergency / set_finished / set_mode。
 
@@ -23,14 +24,16 @@ class VcuSim:
     STATE_DRIVING = 10
     STATE_FINISHED = 11
     STATE_EMERGENCY = 12
-    # 默认模式 1（操控性/未选任务）：can_interface 视为忽略、不发布 mission_mode_cmd，
-    # 避免其持续注入干扰 L1 模式映射用例的"仅变化时发布"断言
+    # 默认模式 1（操控性/未选任务）：can_interface 视为忽略、不发布 mission_mode_cmd
     DEFAULT_MODE = 1
 
-    def __init__(self, interface, protocol_path, period_ms=100):
+    def __init__(self, interface, protocol_path, period_ms=0, poll_ms=10):
         self._sock = CanSocket(interface, recv_timeout=0.01)
         self._proto = Protocol(protocol_path)
+        # period_ms=0：仅事件驱动（默认）；>0 时额外按该周期广播（兼容旧用例）
         self.period = period_ms / 1000.0
+        self._poll = poll_ms / 1000.0
+        self._last_sent = None
         self._lock = threading.Lock()
         self._online = False
         self._go = False
@@ -90,19 +93,35 @@ class VcuSim:
         return True
 
     def _loop(self):
+        last_periodic = 0.0
         while self._running:
-            data = bytearray(8)
-            data[self._proto.rx['state_byte']] = self.state
-            data[self._proto.rx['mode_byte']] = self.mode
-            self._sock.send(self._proto.rx['id'], bytes(data))
-            # 顺带读取 0x210（非阻塞），解析上线信号
+            # 读取 0x210（非阻塞），解析上线信号以推进自身状态机
             frame = self._sock.recv()
             if frame is not None:
                 can_id, payload = frame
                 if can_id == self._proto.tx['id']:
                     with self._lock:
                         self._online = self._proto.decode_210(payload)['online']
-            time.sleep(self.period)
+
+            snapshot = (self.state, self.mode)
+            now = time.monotonic()
+            if snapshot != self._last_sent:
+                # 事件驱动：状态/模式变化即发一帧
+                self._send_state(*snapshot)
+                self._last_sent = snapshot
+                last_periodic = now
+            elif self.period > 0 and now - last_periodic >= self.period:
+                # 可选的周期广播（默认关闭）
+                self._send_state(*snapshot)
+                last_periodic = now
+            time.sleep(self._poll)
+
+    def _send_state(self, state, mode):
+        """发送一帧 0x501（Byte1=状态、Byte2=模式）."""
+        data = bytearray(8)
+        data[self._proto.rx['state_byte']] = state
+        data[self._proto.rx['mode_byte']] = mode
+        self._sock.send(self._proto.rx['id'], bytes(data))
 
     def stop(self):
         """停止模拟."""
@@ -116,10 +135,11 @@ class VcuSim:
 def main(argv=None):
     """CLI：后台常驻模拟 VCU（供 hil_test.sh 等调用）."""
     import argparse
-    parser = argparse.ArgumentParser(description='模拟 VCU（周期发 0x501）')
+    parser = argparse.ArgumentParser(description='模拟 VCU（事件驱动发 0x501）')
     parser.add_argument('--interface', required=True)
     parser.add_argument('--protocol', required=True)
-    parser.add_argument('--period-ms', type=int, default=100)
+    parser.add_argument('--period-ms', type=int, default=0,
+                        help='额外周期广播周期(ms)，0=仅事件驱动（默认）')
     args = parser.parse_args(argv)
 
     sim = VcuSim(args.interface, args.protocol, period_ms=args.period_ms)

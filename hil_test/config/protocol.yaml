@@ -29,7 +29,7 @@ tx_210:
 # VCU → 工控机（接收）
 rx_501:
   id: 0x501
-  period_ms: 100          # 10Hz
+  # 事件驱动：VCU 在状态/模式变化时发帧，无固定周期（旧"10Hz 心跳"为测试侧假定，待与 VCU 确认）
   dlc: 8
   state_byte: 0           # Byte1: VCU 状态
   mode_byte: 1            # Byte2: 测试模式

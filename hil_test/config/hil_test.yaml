@@ -6,14 +6,16 @@ can:
     - vcan0
 
 bench:
-  target_speed_mps: 1.0  # L3/L4 台架代发目标车速（安全限速：车辆架起低速验证，先低后调）
+  # L3 台架安全限速（唯一旋钮，先低后调）。台架反馈车速代发为 0，
+  # 该值经 waypoints 成为 controller 目标速度，并近似等比例决定纵向开度，
+  # 故须保持低位以免架起的轮子高速空转。L4 车检速度不走这里，
+  # 取 FSD controller.yaml 的 inspection_speed。
+  target_speed_mps: 0.2
 
 test:
   frames:
-    - id: 0x210          # 工控机→VCU 心跳（10Hz 保活）
+    - id: 0x210          # 工控机→VCU 10Hz 保活（本机职责，周期可判定）
       period_ms: 100
-    - id: 0x501          # VCU→工控机 心跳（10Hz）
-      period_ms: 100
-  period_tolerance_ratio: 0.2  # 心跳周期容差（±20%）
-  watchdog_timeout_ms: 1000    # VCU 失联看门狗阈值（L2 看门狗用例，与 FSD 约定一致）
+    - id: 0x501          # VCU→工控机 状态帧（事件驱动，无心跳、不判周期）
+  period_tolerance_ratio: 0.2  # 周期容差（±20%），仅适用于 0x210 保活
   ros_timeout_sec: 5.0         # ROS 话题等待/断言超时

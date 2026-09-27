@@ -26,13 +26,13 @@ _CONFIG_DIR = os.environ.get(
 
 
 def _bench_target_speed():
-    """读取 hil_test.yaml bench.target_speed_mps（缺省 1.0 m/s 安全限速）."""
+    """读取 hil_test.yaml bench.target_speed_mps（缺省 0.2 m/s 安全限速，L3 台架用）."""
     try:
         import yaml
         with open(os.path.join(_CONFIG_DIR, 'hil_test.yaml'), 'r', encoding='utf-8') as f:
-            return float(yaml.safe_load(f).get('bench', {}).get('target_speed_mps', 1.0))
+            return float(yaml.safe_load(f).get('bench', {}).get('target_speed_mps', 0.2))
     except (OSError, ValueError, TypeError):
-        return 1.0
+        return 0.2
 
 
 class RosInjector:
@@ -148,7 +148,7 @@ class RosInjector:
         self._pub_insp.publish(msg)
 
     def publish_velocity(self, vx):
-        """注入 /chcnav/velocity（L3 台架车速源，FSD 侧不改动）."""
+        """注入 /chcnav/velocity（L4 台架车速源，FSD 侧不改动）."""
         msg = self._TwistStamped()
         msg.header.stamp = self._node.get_clock().now().to_msg()
         msg.twist.linear.x = float(vx)
