@@ -3,10 +3,10 @@
 #
 # 用法:
 #   ./scripts/hil_test.sh                     # 交互: 编译 → 选链路 → 跑 → 出结果
-#   ./scripts/hil_test.sh -l L1 -i vcan0      # 直接指定链路与接口
-#   ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线: L0→L1→L2→L3 连跑(失败即停)
+#   ./scripts/hil_test.sh -l L1 -i vcan0      # 直接指定链路与接口（L1 = 协议单测 + vcu_sim + 链路/协议）
+#   ./scripts/hil_test.sh -l all -i vcan0     # 一键流水线: L1→L2→L3 连跑(失败即停)
 #   ./scripts/hil_test.sh -l L3 -i can0 -n    # L3/L4 台架模式（HIL_BENCH=1）
-#   ./scripts/hil_test.sh --no-build -l L0    # 跳过编译
+#   ./scripts/hil_test.sh --no-build -l L2    # 跳过编译
 # 真实 ZLG USB-CAN：先在 zlgcan_bridge 下运行 sudo ./start_zlg_bridge.sh 起桥，再用 -i can0
 set -euo pipefail
 
@@ -31,7 +31,7 @@ usage() {
   cat <<EOF
 用法: $(basename "$0") [选项]
 
-  -l, --level <L0|L1|L2|L3|L4|all>  测试层级（缺省交互选择；all=流水线连跑）
+  -l, --level <L1|L2|L3|L4|all>    测试层级（缺省交互选择；all=流水线连跑）
   -i, --interface <接口名>          CAN 接口（缺省 vcan0；真实 USB-CAN 按实际名称，如 can0/can1）
   -m, --mode <sim|real>            sim=仿真(vcan) / real=真实接口（缺省按接口名自动推断）
   -b, --build                       编译 FSD（默认开启）
@@ -74,18 +74,17 @@ case "$MODE" in sim|real) ;; *) echo "!! 非法 mode: $MODE" >&2; exit 1 ;; esac
 
 # ---- 层级合法性校验 / 交互选择 ----
 valid_level() {
-  case "$1" in L0|L1|L2|L3|L4|all) return 0 ;; *) return 1 ;; esac
+  case "$1" in L1|L2|L3|L4|all) return 0 ;; *) return 1 ;; esac
 }
 
 if [ -z "$LEVEL" ]; then
-  echo "选择测试层级（五层框架）:"
-  echo "  all)   流水线连跑 (L0→L1→L2→L3, 失败即停)"
-  echo "  L0)    纯仿真验证 (vcan0, 无 FSD, 协议单测+VCU 模拟)"
-  echo "  L1)    链路 + 协议通畅"
+  echo "选择测试层级（四层框架）:"
+  echo "  all)   流水线连跑 (L1→L2→L3, 失败即停)"
+  echo "  L1)    协议单测+VCU 模拟 + 链路/协议 (先无节点后起节点)"
   echo "  L2)    传感器自检故障模拟 (故障即切 EMERGENCY, 断电层)"
   echo "  L3)    低速动态安全闭环 (AMI直线加速+RES Go+RES急停, 需台架 -n)"
   echo "  L4)    车检任务全链路 (AMI直选车检, 需台架 -n)"
-  read -rp "输入 [all/L0/L1/L2/L3/L4]: " LEVEL
+  read -rp "输入 [all/L1/L2/L3/L4]: " LEVEL
 fi
 if ! valid_level "$LEVEL"; then
   echo "!! 非法层级: $LEVEL" >&2; exit 1
@@ -220,9 +219,6 @@ MM_HIL_PARAMS="$HIL_CFG/hil_fsd/mission_manager.yaml"
 start_level_nodes() {
   local level="$1"
   case "$level" in
-    L0)
-      # 纯仿真验证：无 FSD 节点；vcu_sim 由 pytest fixture 启动
-      ;;
     L1)
       start_node can_interface can_interface_node \
         --ros-args --params-file "$CAN_PARAMS" -p can_device:="$INTERFACE"
@@ -260,14 +256,13 @@ start_level_nodes() {
   esac
 }
 
-# ---- 跑单层：起节点 → pytest（输出直通终端）→ 停节点 ----
+# ---- 跑单层：L1 先无节点跑协议单测/VCU 模型(pre)，再起节点跑链路/协议(post)；其余层单阶段 ----
 run_level() {
   local level="$1"
   export HIL_LEVEL_DIR="$LOG_DIR/$level"
   mkdir -p "$HIL_LEVEL_DIR"
   echo ""
   echo "==> 运行 $level (interface=$INTERFACE)"
-  start_level_nodes "$level"
   export HIL_INTERFACE="$INTERFACE"
   export HIL_CONFIG="$HIL_CFG"
   export HIL_MM_PARAMS="$MM_PARAMS"        # L2/L4 用例自管 mission_manager 用
@@ -275,8 +270,25 @@ run_level() {
   if [ "$BENCH" -eq 1 ]; then
     export HIL_BENCH=1
   fi
-  python3 "$HIL_ROOT/scripts/run_hil.py" --level "$level" --interface "$INTERFACE"
-  local rc=$?
+
+  local rc=0
+  # L1 pre：协议编解码单测 + vcu_sim 模型，不依赖 FSD，不起任何节点
+  # （若与 can_interface 同跑，其 10Hz 0x210 会反复改写 vcu_sim 在线状态，干扰模型用例）
+  if [ "$level" = "L1" ]; then
+    python3 "$HIL_ROOT/scripts/run_hil.py" --level L1 --phase pre \
+      --interface "$INTERFACE" || rc=$?
+  fi
+  # L1 post / 其余层：起该层所需 FSD 节点后跑
+  if [ "$rc" -eq 0 ]; then
+    start_level_nodes "$level"
+    if [ "$level" = "L1" ]; then
+      python3 "$HIL_ROOT/scripts/run_hil.py" --level L1 --phase post \
+        --interface "$INTERFACE" || rc=$?
+    else
+      python3 "$HIL_ROOT/scripts/run_hil.py" --level "$level" \
+        --interface "$INTERFACE" || rc=$?
+    fi
+  fi
   if [ "$rc" -ne 0 ]; then
     echo "!! $level 未通过 (exit=$rc)；节点日志: $HIL_LEVEL_DIR/*.log" >&2
   fi
@@ -287,15 +299,10 @@ run_level() {
 }
 
 # ---- 执行 ----
-if [ "$LEVEL" = "L0" ] && [ "$MODE" = "real" ]; then
-  echo "!! L0 为纯仿真验证，仅限仿真接口（如 vcan0）；真实接口请用 -l L1" >&2
-  exit 2
-fi
-
 TEST_RC=0
 if [ "$LEVEL" = "all" ]; then
   if [ "$MODE" = "sim" ]; then
-    LEVELS_RUN="L0 L1 L2 L3"
+    LEVELS_RUN="L1 L2 L3"
   else
     LEVELS_RUN="L1"
     echo "!! all(real): L2 需 mission_manager 自管 / L3、L4 需真实台架通电（-n），请单独运行:" >&2

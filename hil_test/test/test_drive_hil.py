@@ -5,7 +5,7 @@ READY(1) → mission_mode_cmd=acceleration → RES Go 放行 → EXPLORE(3)
 → controller 经 can_interface 上 CAN（0x210）输出驱动开度 → RES 急停
 → /system/emergency=true + mission_state EMERGENCY(7) + 0x210 纵向清零。
 
-目标车速由 hil_test.yaml bench.target_speed_mps 限制（默认 1.0 m/s 安全低速，
+目标车速由 hil_test.yaml bench.target_speed_mps 限制（默认 0.2 m/s 安全低速，
 先低后调），经 /planning/final_waypoints 的直路下发。
 
 台架模式（真实接口 + HIL_BENCH=1）：车辆架起通电，位姿/车速/路径/就绪信号

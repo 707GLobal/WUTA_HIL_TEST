@@ -116,13 +116,13 @@ def test_ami_inspection_entry(fsd_ready, mm, vcu):
 
 
 @pytest.mark.integration
-def test_inspection_motion(fsd_ready, mm, bus_monitor, protocol):
+def test_inspection_motion(fsd_ready, mm, vcu, bus_monitor, protocol):
     """车检运动：纵向驱动开度 + 正弦 15°@0.4Hz 转向幅值与过零.
 
     车速反馈代发 0.0（车辆静止/架起），与目标 1.0 m/s 保持速度误差，
     确保纵向开度持续非零（反馈等于目标时 PID 误差为 0，开度会回零）。
     """
-    _enter_inspection(fsd_ready, None)
+    _enter_inspection(fsd_ready, vcu)
     amp = zero = driven = False
     deadline = time.time() + 6.0  # 覆盖两个以上正弦周期（2.5s/周期）
     while time.time() < deadline:

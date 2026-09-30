@@ -1,10 +1,10 @@
 """pytest 公共配置：路径、fixtures、markers.
 
-分层 marker：
-  sim        - L0 仿真预跑（vcan 模拟 VCU）
-  unit       - L0 协议编解码单测（无需硬件）
-  link       - L1 链路自检（需 can_interface）
-  protocol   - L1 协议一致性集成（需 can_interface）
+分层 marker（L1 分两阶段：pre 不依赖 FSD / post 需 can_interface）：
+  sim        - L1 pre：vcan 模拟 VCU（vcu_sim 模型，无需 FSD）
+  unit       - L1 pre：协议编解码单测（无需硬件）
+  link       - L1 post：链路自检（需 can_interface）
+  protocol   - L1 post：协议一致性集成（需 can_interface）
   selfcheck  - L2 传感器自检故障模拟（断电层，mission_manager 默认参数）
   motor      - L3 低速动态安全闭环：门控/Go/急停（slow，通电层）
   inspection - L4 车检任务全链路（slow，通电层）
@@ -108,8 +108,15 @@ def bus_monitor(interface, tmp_path):
 
 
 @pytest.fixture
-def vcu_sim(can_ready):
-    """L0 仿真 VCU（集成用例用）."""
+def vcu_sim(can_ready, is_sim):
+    """仿真 VCU（L1 前置模型用例用）.
+
+    仅仿真接口可用：真实接口下会向真实总线注入 0x501/0x210，必须跳过以
+    防污染真实 VCU。
+    """
+    if not is_sim:
+        pytest.skip(f'{can_ready} 为真实接口：vcu_sim 模型用例仅仿真接口运行'
+                    f'（防模拟帧污染真实 VCU）')
     from hil_test.vcu_sim import VcuSim
     sim = VcuSim(can_ready, _config_path('protocol.yaml'))
     if not sim.start():

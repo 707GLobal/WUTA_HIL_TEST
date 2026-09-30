@@ -56,6 +56,19 @@ def _wait_until(predicate, timeout):
     return False
 
 
+def _require_sim_fault(is_sim, interface):
+    """断流/锁存故障用例仅仿真接口运行.
+
+    真实链路下这两条会给真实 VCU 下发 Signal3=0，把 VCU 打入 EMERGENCY 且
+    VCU 侧锁存、无法回退，影响后续测试；该安全链在 vcan0 已完整覆盖，
+    真实链路只保留 test_never_online_timeout 一条端到端联动。
+    """
+    if not is_sim:
+        pytest.skip(
+            f'{interface} 为真实接口：断流/锁存故障注入仅 vcan0 运行'
+            f'（避免真实 VCU 被锁死在 EMERGENCY）')
+
+
 @pytest.mark.integration
 def test_selfcheck_all_pass(mm_factory, fsd_ready):
     """自检通过：三传感器持续在线 → ok=true，状态保持 IDLE 不误报."""
@@ -68,8 +81,14 @@ def test_selfcheck_all_pass(mm_factory, fsd_ready):
 
 
 @pytest.mark.integration
-def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol):
-    """从未上线：超过宽限期 → ok=false + failures，立即切 EMERGENCY，Signal3=0."""
+def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol, is_sim, interface):
+    """从未上线：超过宽限期 → ok=false + failures，立即切 EMERGENCY，Signal3=0.
+
+    本用例是 L2 在真实链路上唯一运行的故障用例（断流/锁存两条仅 vcan0）：
+    FSD 侧（devices_inspection/mission_state）与 0x210 Signal3=0 之后，
+    真实链路再断言真实 VCU 的联动响应（0x501 Byte1=12）。
+    注意：真实 VCU 因此进入 EMERGENCY 并锁存，跑完须复位（见 README「真车运行与复位」）。
+    """
     mm_factory()
     # 不发布任何传感器数据：宽限 4s + 检查周期 1s + 余量
     expected = (False, ('lidar', 'imu', 'camera'))
@@ -90,10 +109,28 @@ def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol):
     assert _wait_until(_signal3_off, 1.0), \
         '自检失败后 0x210 Signal3 未置 0（VCU 不会切 EMERGENCY）'
 
+    # 真实链路：验证真实 VCU 收到 Signal3=0 后自身进 EMERGENCY（0x501 Byte1=12）。
+    # vcu_sim 不建模「Signal3=0 → EMERGENCY」该联动，故仿真接口下不做此断言。
+    if not is_sim:
+        assert bus_monitor.wait_for(protocol.rx['id'], timeout=10.0), \
+            '未收到 VCU 0x501 状态帧（真实链路需 VCU 上电，见 README「接入真实 VCU」）'
+
+        def _vcu_emergency():
+            latest = bus_monitor.latest(protocol.rx['id'])
+            return (latest is not None
+                    and latest[1][protocol.rx['state_byte']] == 12)
+
+        assert _wait_until(_vcu_emergency, 10.0), \
+            '真实 VCU 未进入 EMERGENCY（0x501 Byte1 未变为 12）'
+
 
 @pytest.mark.integration
-def test_mid_stream_dropout(mm_factory, fsd_ready):
-    """中途断流：先上线再停发 → 超过 sensor_timeout 2s 判故障并切 EMERGENCY."""
+def test_mid_stream_dropout(mm_factory, fsd_ready, is_sim, interface):
+    """中途断流：先上线再停发 → 超过 sensor_timeout 2s 判故障并切 EMERGENCY.
+
+    仅 vcan0：真实链路制造断流需停真实传感器且会给 VCU 下发 Signal3=0（见 _require_sim_fault）。
+    """
+    _require_sim_fault(is_sim, interface)
     mm_factory()
     _feed_sensors(fsd_ready, 2.5)  # 全部上线（宽限期内）
     expected = (False, ('lidar', 'imu', 'camera'))
@@ -104,8 +141,12 @@ def test_mid_stream_dropout(mm_factory, fsd_ready):
 
 
 @pytest.mark.integration
-def test_fault_latched(mm_factory, fsd_ready):
-    """故障锁存：EMERGENCY 后恢复数据流，状态与上报保持失败（不可恢复）."""
+def test_fault_latched(mm_factory, fsd_ready, is_sim, interface):
+    """故障锁存：EMERGENCY 后恢复数据流，状态与上报保持失败（不可恢复）.
+
+    仅 vcan0：真实链路会把真实 VCU 锁死在 EMERGENCY 且无法回退（见 _require_sim_fault）。
+    """
+    _require_sim_fault(is_sim, interface)
     mm_factory()
     expected = (False, ('lidar', 'imu', 'camera'))
     assert fsd_ready.wait_for('/system/devices_inspection', expected, timeout=10.0), \

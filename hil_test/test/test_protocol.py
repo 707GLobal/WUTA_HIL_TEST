@@ -1,10 +1,10 @@
-"""L0 纯仿真验证 + L1 链路自检/协议一致性（pytest）.
+"""L1 协议/链路测试（pytest）：协议单测 + vcu_sim 模型（pre）+ 链路/协议集成（post）.
 
-marker:
-  sim      - L0：vcan 模拟 VCU（纯 CAN，无需 ROS）
-  unit     - L0：协议编解码单测（无需硬件）
-  link     - L1：接口 up / 心跳 / fail-safe（需 can_interface 运行）
-  protocol - L1：ROS 集成，0x501→话题映射 / 0x210 定标透传（需 can_interface 运行）
+marker（L1 分两阶段执行，见 run_hil.py / hil_test.sh）：
+  sim      - L1 pre：vcan 模拟 VCU（纯 CAN，无需 ROS/FSD）
+  unit     - L1 pre：协议编解码单测（无需硬件）
+  link     - L1 post：接口 up / 心跳 / fail-safe（需 can_interface 运行）
+  protocol - L1 post：ROS 集成，0x501→话题映射 / 0x210 定标透传（需 can_interface 运行）
 """
 
 import time
@@ -31,7 +31,7 @@ def _inject_501(interface, protocol, state, mode=None, count=20):
         fi.close()
 
 
-# ================= L0 纯协议单测（无需硬件） =================
+# ================= L1 pre · 协议编解码单测（无需硬件） =================
 
 @pytest.mark.unit
 def test_scale_center(protocol):
@@ -96,7 +96,7 @@ def test_mode_topic_map(protocol):
     assert protocol.mode_topic(99) is None  # 未知模式
 
 
-# ================= L0 仿真预跑（vcan + vcu_sim） =================
+# ================= L1 pre · VCU 模拟（vcan + vcu_sim） =================
 
 @pytest.mark.sim
 def test_sim_501_event(vcu_sim, bus_monitor, protocol):
@@ -156,7 +156,7 @@ def _wait_until(predicate, timeout):
     return False
 
 
-# ================= L1 链路自检（需 can_interface 运行） =================
+# ================= L1 post · 链路自检（需 can_interface 运行） =================
 
 @pytest.mark.link
 def test_link_can_interface_up(can_ready):
@@ -174,7 +174,7 @@ def test_link_210_heartbeat(fsd_ready, bus_monitor, protocol):
     assert stats is not None and 0.06 <= stats['avg'] <= 0.14
 
 
-# ================= L1 ROS 集成（需 can_interface 运行 + vcan0 注入） =================
+# ================= L1 post · ROS 集成（需 can_interface 运行 + vcan0 注入） =================
 
 @pytest.mark.protocol
 @pytest.mark.integration
