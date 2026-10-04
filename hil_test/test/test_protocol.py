@@ -1,12 +1,17 @@
 """L1 协议/链路测试（pytest）：协议单测 + vcu_sim 模型（pre）+ 链路/协议集成（post）.
 
 marker（L1 分两阶段执行，见 run_hil.py / hil_test.sh）：
-  sim      - L1 pre：vcan 模拟 VCU（纯 CAN，无需 ROS/FSD）
+  sim      - L1 pre：vcan 模拟 VCU + RES（纯 CAN，无需 ROS/FSD）
   unit     - L1 pre：协议编解码单测（无需硬件）
   link     - L1 post：接口 up / 心跳 / fail-safe（需 can_interface 运行）
-  protocol - L1 post：ROS 集成，0x501 模式→话题映射 / 0x210 定标透传（需 can_interface 运行）
+  protocol - L1 post：ROS 集成，0x501 模式→话题映射 / 0x1E4 RES→start/emergency
+             映射 / 0x210 定标透传（需 can_interface 运行）
 
-新协议：0x501 Byte1 = 测试模式，原 Byte1「VCU 状态」定义已取消（不再有 Go/急停）。
+新协议：0x501 Byte1 = 测试模式，原 Byte1「VCU 状态」定义已取消（不再有 Go/急停）；
+发车放行与急停改由 RES 的 0x1E4（Byte1=0x13/0x10）承载，经 can_interface 分别
+发布 /system/start_command 与 /system/emergency。
+
+用例顺序敏感：test_1e4_estop_mapping 必须留在文件末尾（急停锁存不可复位）。
 """
 
 import time
@@ -29,6 +34,17 @@ def _inject_501(interface, protocol, mode, count=20):
     assert fi.open()
     try:
         return fi.inject_mode(mode, count=count)
+    finally:
+        fi.close()
+
+
+def _inject_1e4(interface, protocol, state, count=1):
+    """向总线注入 0x1E4 RES 状态帧（FaultInjector）."""
+    from hil_test.fault_injector import FaultInjector
+    fi = FaultInjector(interface, protocol.path)
+    assert fi.open()
+    try:
+        return fi.inject_res(state, count=count)
     finally:
         fi.close()
 
@@ -97,6 +113,37 @@ def test_mode_topic_map(protocol):
     assert protocol.mode_topic(99) is None  # 未知模式
 
 
+@pytest.mark.unit
+def test_decode_1e4(protocol):
+    """0x1E4 解析：Byte1 = RES 遥控器状态（上线/发车/急停）."""
+    from hil_test.protocol_loader import RES_ESTOP, RES_ONLINE, RES_START
+    for state in (RES_ONLINE, RES_START, RES_ESTOP):
+        assert protocol.decode_1e4(protocol.encode_1e4(state)) == state
+
+
+@pytest.mark.unit
+def test_1e4_state_map(protocol):
+    """0x1E4 配置：ID/DLC/Byte1 位置与状态映射（与 can_interface.cpp kRes* 一致）."""
+    from hil_test.protocol_loader import RES_ESTOP, RES_ONLINE, RES_START
+    assert protocol.res['id'] == 0x1E4
+    assert protocol.res['byte'] == 0       # Byte1（0 基）承载 RES 状态
+    assert protocol.res['dlc'] == 3        # 协议文档 DLC（实测桥侧记 8，解析不校验）
+    assert protocol.res_state(RES_ONLINE) == 'online'
+    assert protocol.res_state(RES_START) == 'start'
+    assert protocol.res_state(RES_ESTOP) == 'estop'
+    assert protocol.res_state(0x00) is None  # 遥控器未上线：未定义
+
+
+@pytest.mark.unit
+def test_encode_1e4_dlc(protocol):
+    """0x1E4 编码：帧长按配置 DLC，状态只占 Byte1，其余补 0."""
+    from hil_test.protocol_loader import RES_START
+    data = protocol.encode_1e4(RES_START)
+    assert len(data) == protocol.res['dlc'] == 3
+    assert data[0] == RES_START
+    assert data[1:] == bytes(len(data) - 1)
+
+
 # ================= L1 pre · VCU 模拟（vcan + vcu_sim） =================
 
 @pytest.mark.sim
@@ -115,6 +162,37 @@ def test_sim_501_event(vcu_sim, bus_monitor, protocol):
     vcu_sim.set_mode(6)
     assert _wait_until(lambda: _mode_is(6), 3.0), '模式再变化后未收到 0x501'
     assert vcu_sim.mode == 6
+
+
+@pytest.mark.sim
+def test_sim_1e4_res_broadcast(vcu_sim, bus_monitor, protocol):
+    """RES 模拟：周期广播 0x1E4 电平（默认 0x11），press_start 发 0x13 脉冲后回落.
+
+    建模依据（实测）：0x1E4 为 33.3Hz 周期电平广播，0x13 为 0.15~0.51s 瞬时脉冲，
+    其余时间为 0x11 上线电平。故必须用 latest_newer_than 等「操作后新到的帧」，
+    latest() 永远有帧、无法区分「刚按下」与「一直停在该状态」。
+    """
+    from hil_test.protocol_loader import RES_ONLINE, RES_START
+
+    def _latest_state():
+        frame = bus_monitor.latest(protocol.res['id'])
+        return None if frame is None else protocol.decode_1e4(frame[1])
+
+    assert _wait_until(lambda: _latest_state() is not None, 3.0), \
+        '未收到 RES 周期广播 0x1E4'
+    assert _latest_state() == RES_ONLINE, 'RES 默认常驻电平应为 0x11 上线'
+
+    t0 = time.monotonic()
+
+    def _pulse_seen():
+        frame = bus_monitor.latest_newer_than(protocol.res['id'], t0)
+        return frame is not None and protocol.decode_1e4(frame[1]) == RES_START
+
+    vcu_sim.press_start()
+    assert _wait_until(_pulse_seen, 3.0), 'press_start 后未在 0x1E4 上看到 0x13'
+    assert vcu_sim.res_state == RES_START  # 脉冲期间状态属性同步
+    assert _wait_until(lambda: _latest_state() == RES_ONLINE, 3.0), \
+        '发车脉冲结束后未回落到 0x11 上线电平'
 
 
 def _wait_until(predicate, timeout):
@@ -194,3 +272,34 @@ def test_210_scaling_from_command(fsd_ready, bus_monitor, protocol):
         f'0x210 纵向未按 throttle_brake 定标: {bus_monitor.latest(protocol.tx["id"])}'
     dec = protocol.decode_210(bus_monitor.latest(protocol.tx['id'])[1])
     assert dec['lateral'] == scale_control(-12.5 / protocol.max_steer_deg)
+
+
+@pytest.mark.protocol
+@pytest.mark.integration
+def test_1e4_start_mapping(fsd_ready, protocol, interface, is_sim):
+    """RES 发车映射：注入 0x1E4 Byte1=0x13 → /system/start_command=True.
+
+    这是 GO 回退的链路前半段：发车按钮经总线到达 can_interface，由其发布
+    /system/start_command；mission_manager 侧的放行门控由 L3/L4 覆盖。
+    """
+    from hil_test.protocol_loader import RES_START
+    _require_sim_interface(interface, is_sim)
+    assert _inject_1e4(interface, protocol, RES_START) > 0
+    assert fsd_ready.wait_for('/system/start_command', True, timeout=5.0), \
+        '注入 0x13 后 can_interface 未发布 /system/start_command=True'
+
+
+@pytest.mark.protocol
+@pytest.mark.integration
+def test_1e4_estop_mapping(fsd_ready, protocol, interface, is_sim):
+    """RES 急停映射：注入 0x1E4 Byte1=0x10 → /system/emergency=True（锁存）.
+
+    必须保留在本文件**最后一个**（pytest 按文件内定义顺序执行）：can_interface 的
+    急停是锁存发布（transient_local），同一进程生命周期内不复位，后续用例若再订阅
+    该话题将一律读到 True。
+    """
+    from hil_test.protocol_loader import RES_ESTOP
+    _require_sim_interface(interface, is_sim)
+    assert _inject_1e4(interface, protocol, RES_ESTOP) > 0
+    assert fsd_ready.wait_for('/system/emergency', True, timeout=5.0), \
+        '注入 0x10 后 can_interface 未发布 /system/emergency=True'

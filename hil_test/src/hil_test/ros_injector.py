@@ -2,8 +2,8 @@
 
 发布 FSD 输入话题（/control/command、/system/mission_state、/system/devices_inspection、
 /system/mission_complete、/chcnav/velocity 台架车速源、传感器数据心跳），订阅
-can_interface/mission_manager 输出话题（/system/emergency、/system/mission_mode_cmd、
-/system/mission_state、/system/devices_inspection）供断言。
+can_interface/mission_manager 输出话题（/system/emergency、/system/start_command、
+/system/mission_mode_cmd、/system/mission_state、/system/devices_inspection）供断言。
 
 HIL 台架模式代发（车辆架起，传感器仅保在线）：
   /system/lidar_ready、/system/localization_ready、/localization/pose、
@@ -96,10 +96,15 @@ class RosInjector:
         self._pub_camera_data = self._node.create_publisher(
             Image, '/zed2i/zed_node/left/image_rect_color', 10)
 
-        # 断言订阅器（/system/emergency 由 mission_manager 自检失败路径发布）
+        # 断言订阅器（/system/emergency 由 mission_manager 自检失败或 can_interface
+        # 收到 RES 急停 0x1E4 Byte1=0x10 时发布）
         self._node.create_subscription(
             Bool, '/system/emergency',
             lambda m: self._on('/system/emergency', m.data), 10)
+        # RES 发车放行（can_interface 解析 0x1E4 Byte1=0x13 → /system/start_command）
+        self._node.create_subscription(
+            Bool, '/system/start_command',
+            lambda m: self._on('/system/start_command', m.data), 10)
         self._node.create_subscription(
             String, '/system/mission_mode_cmd',
             lambda m: self._on('/system/mission_mode_cmd', m.data), 10)

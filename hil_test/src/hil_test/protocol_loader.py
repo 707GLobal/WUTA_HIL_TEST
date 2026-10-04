@@ -1,13 +1,21 @@
-"""解析 protocol.yaml，编解码统一入口（0x210 / 0x501）.
+"""解析 protocol.yaml，编解码统一入口（0x210 / 0x501 / 0x1E4）.
 
 定标规则与 can_interface.cpp scaleControl() 保持一致：
   控制量 x∈[-1,1] → 10~65525，32767 为中心（0 控制）
   驱动/右：32767 + x*32758；制动/左：32767 + x*32757；钳位 [10, 65525]
+
+0x1E4（RES 遥控器 → 工控机）：33.3Hz 周期电平广播，Byte1 = 遥控器状态，
+  0x11 上线 / 0x13 发车按钮（瞬时脉冲）/ 0x10 急停（持续电平）。
 """
 
 import os
 
 import yaml
+
+# 0x1E4 Byte1 RES 状态（与 can_interface.cpp 的 kRes* 常量保持一致）
+RES_ESTOP = 0x10
+RES_ONLINE = 0x11
+RES_START = 0x13
 
 
 def scale_control(x):
@@ -25,6 +33,7 @@ class Protocol:
         self.path = os.path.abspath(path)
         self.tx = cfg['tx_210']
         self.rx = cfg['rx_501']
+        self.res = cfg['rx_1e4']
         self.max_steer_deg = float(self.tx['max_steer_deg'])
 
     # ---- 编码 0x210（工控机→VCU）----
@@ -59,6 +68,21 @@ class Protocol:
     def mode_topic(self, mode):
         """测试模式 → mission_mode_cmd 字符串；None 表示忽略（操控性=有人驾驶）."""
         return self.rx['mode_topic_map'].get(mode)
+
+    # ---- 编解码 0x1E4（RES 遥控器 → 工控机）----
+    def encode_1e4(self, state):
+        """组装 0x1E4 帧数据（Byte1=RES 状态，其余补 0）."""
+        data = bytearray(int(self.res.get('dlc', 3)))
+        data[self.res['byte']] = state
+        return bytes(data)
+
+    def decode_1e4(self, data):
+        """解析 0x1E4：返回 Byte1（RES 状态）."""
+        return data[self.res['byte']]
+
+    def res_state(self, value):
+        """RES 状态字节 → 名称（online/start/estop）；未知返回 None."""
+        return self.res['state_map'].get(value)
 
     @staticmethod
     def _put_u16(data, offset, value):

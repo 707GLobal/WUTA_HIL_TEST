@@ -62,6 +62,11 @@ class BusMonitor:
             self._log_file = None
 
     # ---- 查询 ----
+    def frames(self):
+        """已记录帧的快照 [(t_monotonic, can_id, data), ...]."""
+        with self._lock:
+            return list(self._frames)
+
     def count(self, can_id):
         """统计某 ID 帧数."""
         with self._lock:
@@ -73,6 +78,20 @@ class BusMonitor:
             for t, cid, data in reversed(self._frames):
                 if cid == can_id:
                     return t, data
+        return None
+
+    def latest_newer_than(self, can_id, t0):
+        """比 t0（monotonic）更新的最近一帧 (t, data)；无则 None.
+
+        用于「等一个新到的帧」：0x1E4 是 33.3Hz 周期电平广播，latest()/wait_for()
+        只会拿到上一拍（或早已在总线上）的帧，无法区分"操作刚发生"与"状态一直是它"。
+        """
+        with self._lock:
+            for t, cid, data in reversed(self._frames):
+                if cid == can_id:
+                    if t >= t0:
+                        return t, data
+                    return None
         return None
 
     def periods(self, can_id):

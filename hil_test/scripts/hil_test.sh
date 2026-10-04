@@ -82,8 +82,8 @@ if [ -z "$LEVEL" ]; then
   echo "  all)   流水线连跑 (L1→L2→L3, 失败即停)"
   echo "  L1)    协议单测+VCU 模拟 + 链路/协议 (先无节点后起节点)"
   echo "  L2)    传感器自检故障模拟 (故障即切 EMERGENCY, 断电层)"
-  echo "  L3)    低速动态安全闭环 (AMI直线加速→选模式即启动→EXPLORE, 需台架 -n)"
-  echo "  L4)    车检任务全链路 (AMI直选车检, 需台架 -n)"
+  echo "  L3)    低速动态安全闭环 (AMI直线加速→门控→RES GO→EXPLORE, 需台架 -n)"
+  echo "  L4)    车检任务全链路 (AMI直选车检→门控→RES GO→INSPECTION, 需台架 -n)"
   read -rp "输入 [all/L1/L2/L3/L4]: " LEVEL
 fi
 if ! valid_level "$LEVEL"; then
@@ -113,7 +113,7 @@ if [ "$CLEAN_BUILD" -eq 1 ] && [ "$DO_BUILD" -eq 0 ]; then
   exit 1
 fi
 if [ "$DO_BUILD" -eq 1 ]; then
-  echo "==> 编译 FSD ($FSD_WS)"
+  echo "==> 编译 FSD"
   cd "$FSD_WS"
   if [ "$CLEAN_BUILD" -eq 1 ]; then
     echo "==> 清理 FSD 编译缓存（build/install/log）"
@@ -171,7 +171,7 @@ start_node() {
   setsid ros2 run "$pkg" "$exe" "$@" >"$log_dir/$exe.log" 2>&1 &
   local pid=$!
   NODE_PIDS+=("$pid")
-  echo "==> 启动 $exe (pid $pid, log $log_dir/$exe.log)"
+  echo "==> 启动 $exe (pid $pid)"
 }
 
 wait_node_ready() {
@@ -194,7 +194,7 @@ stop_nodes() {
     kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
   done
   NODE_PIDS=()
-  echo "==> 已停止节点 ($n)"
+  echo "==> 已停止 FSD 节点 ($n)"
 }
 
 cleanup() {
@@ -203,7 +203,6 @@ cleanup() {
     return
   fi
   stop_nodes
-  echo "==> FSD 节点已清理"
 }
 trap cleanup EXIT
 
@@ -290,7 +289,7 @@ run_level() {
     fi
   fi
   if [ "$rc" -ne 0 ]; then
-    echo "!! $level 未通过 (exit=$rc)；节点日志: $HIL_LEVEL_DIR/*.log" >&2
+    echo "!! $level 未通过 (exit=$rc)" >&2
   fi
   if [ "$LEVEL" = "all" ] || [ "$KEEP_NODES" -eq 0 ]; then
     stop_nodes
@@ -323,12 +322,10 @@ fi
 
 # ---- 输出结果（pytest 明细已实时打到终端） ----
 echo ""
-echo "=============================================="
+LOG_REL="${LOG_DIR/"$REPO_ROOT"\//}"   # 相对仓库根，便于直接复制
 if [ "$TEST_RC" -eq 0 ]; then
-  echo "[hil_test] $LEVEL 通过"
+  echo "[hil_test] $LEVEL 通过  (日志: $LOG_REL)"
 else
-  echo "[hil_test] $LEVEL 未通过 (exit=$TEST_RC)"
+  echo "[hil_test] $LEVEL 未通过 (exit=$TEST_RC)  (日志: $LOG_REL)" >&2
 fi
-echo "[hil_test] 节点日志目录: $LOG_DIR（logs/latest 指向最新批次）"
-echo "=============================================="
 exit "$TEST_RC"

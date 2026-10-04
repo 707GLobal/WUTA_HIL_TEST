@@ -1,13 +1,13 @@
 """pytest 公共配置：路径、fixtures、markers.
 
 分层 marker（L1 分两阶段：pre 不依赖 FSD / post 需 can_interface）：
-  sim        - L1 pre：vcan 模拟 VCU（vcu_sim 模型，无需 FSD）
+  sim        - L1 pre：vcan 模拟 VCU + RES（vcu_sim 模型，无需 FSD）
   unit       - L1 pre：协议编解码单测（无需硬件）
   link       - L1 post：链路自检（需 can_interface）
   protocol   - L1 post：协议一致性集成（需 can_interface）
   selfcheck  - L2 传感器自检故障模拟（断电层，mission_manager 默认参数）
-  motor      - L3 低速动态安全闭环：选模式启动 + 低速驱动（slow，通电层）
-  inspection - L4 车检任务全链路（slow，通电层）
+  motor      - L3 低速动态安全闭环：选模式 + RES 放行 + 低速驱动（slow，通电层）
+  inspection - L4 车检任务全链路：选模式 + RES 放行 + 车检（slow，通电层）
   integration - 依赖 can_interface/FSD 运行，需工控机环境
 """
 

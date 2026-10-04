@@ -3,10 +3,12 @@
 四层测试框架：
   L1 链路 + 协议（原 L0 已并入，分两阶段）：
       pre  —— 协议编解码单测 + vcu_sim 模型（不依赖 FSD，脚本不起任何节点）
-      post —— 链路自检 + 0x501/0x210 协议集成（需 can_interface）
+      post —— 链路自检 + 0x501/0x1E4/0x210 协议集成（需 can_interface）
   L2 传感器自检故障模拟（selfcheck，故障即切 EMERGENCY，断电层）
-  L3 AMI 模式选择 + 低速驱动（motor：AMI 选直线加速 → 选模式即启动 → EXPLORE，通电层）
-  L4 车检任务全链路（inspection：AMI 直选车检模式，通电层）
+  L3 AMI 模式选择 + RES 放行 + 低速驱动
+     （motor：AMI 选直线加速 → 门控 → RES GO(0x1E4 0x13) → EXPLORE，通电层）
+  L4 车检任务全链路
+     （inspection：AMI 直选车检模式 → 门控 → RES GO → INSPECTION，通电层）
 
 L1 分两阶段的原因：vcu_sim 模型用例需要一个"干净"的总线，若与 can_interface
 同跑，can_interface 的 10Hz 0x210（Signal3=0）会反复改写 vcu_sim 的在线状态，
@@ -68,9 +70,6 @@ def main():
         print(f'[run_hil] 错误: 层级 {args.level} 无阶段 {phase}', file=sys.stderr)
         sys.exit(2)
     test_file, marker = phases[phase]
-
-    print(f'[run_hil] level={args.level} phase={phase} file={test_file} '
-          f'marker={marker} interface={interface}')
 
     env = os.environ.copy()
     env['HIL_INTERFACE'] = interface

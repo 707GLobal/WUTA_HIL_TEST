@@ -43,3 +43,21 @@ rx_501:
     4: skidpad
     5: ebs_test
     6: inspection
+
+# RES 遥控器 → 工控机（接收）：发车放行与急停
+# 实测（2026-10-03 zlgcan_bridge 抓包 log/20261003_203934/vcu2fsd/0x1E4.log）：
+#   - 33.3Hz 周期电平广播（中位 30ms，P10/P90 = 26/34ms）；桥侧 DLC 记为 8（协议文档写 3）
+#   - 0x11 遥控器上线：长电平（数十秒~上千秒）
+#   - 0x13 发车按钮：瞬时脉冲（实测 0.15~0.51s）
+#   - 0x10 急停：持续电平（实测 9.6~475s）
+#   - 0x00 遥控器未上线（不在三态定义内，FSD 侧忽略）
+# can_interface 只读 Byte1（dlc>=1 即可），故这里以协议文档的 dlc=3 为准。
+rx_1e4:
+  id: 0x1E4
+  dlc: 3                 # 标准帧 / 500k；实测桥日志 dlc=8，解码不依赖 dlc
+  byte: 0                # Byte1：RES 状态
+  period_ms: 30          # 实测广播周期（vcu_sim 按此模拟）
+  state_map:
+    0x11: online         # 遥控器上线
+    0x13: start          # 发车按钮被按下 → /system/start_command
+    0x10: estop          # 按下急停 → /system/emergency（锁存）
