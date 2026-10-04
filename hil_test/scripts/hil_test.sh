@@ -82,7 +82,7 @@ if [ -z "$LEVEL" ]; then
   echo "  all)   流水线连跑 (L1→L2→L3, 失败即停)"
   echo "  L1)    协议单测+VCU 模拟 + 链路/协议 (先无节点后起节点)"
   echo "  L2)    传感器自检故障模拟 (故障即切 EMERGENCY, 断电层)"
-  echo "  L3)    低速动态安全闭环 (AMI直线加速+RES Go+RES急停, 需台架 -n)"
+  echo "  L3)    低速动态安全闭环 (AMI直线加速→选模式即启动→EXPLORE, 需台架 -n)"
   echo "  L4)    车检任务全链路 (AMI直选车检, 需台架 -n)"
   read -rp "输入 [all/L1/L2/L3/L4]: " LEVEL
 fi
@@ -223,7 +223,7 @@ start_level_nodes() {
       start_node can_interface can_interface_node \
         --ros-args --params-file "$CAN_PARAMS" -p can_device:="$INTERFACE"
       if [ "$MODE" = "sim" ]; then
-        # 仿真接口补 VCU 模拟，提供 0x501 状态/模式源（事件驱动）
+        # 仿真接口补 VCU 模拟，提供 0x501 模式源（事件驱动）
         PYTHONPATH="$HIL_ROOT/src" python3 -m hil_test.vcu_sim \
           --interface "$INTERFACE" --protocol "$HIL_CFG/protocol.yaml" \
           >"${HIL_LEVEL_DIR:-$LOG_DIR}/vcu_sim.log" 2>&1 &

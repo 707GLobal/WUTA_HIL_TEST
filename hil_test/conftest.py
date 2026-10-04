@@ -6,7 +6,7 @@
   link       - L1 post：链路自检（需 can_interface）
   protocol   - L1 post：协议一致性集成（需 can_interface）
   selfcheck  - L2 传感器自检故障模拟（断电层，mission_manager 默认参数）
-  motor      - L3 低速动态安全闭环：门控/Go/急停（slow，通电层）
+  motor      - L3 低速动态安全闭环：选模式启动 + 低速驱动（slow，通电层）
   inspection - L4 车检任务全链路（slow，通电层）
   integration - 依赖 can_interface/FSD 运行，需工控机环境
 """
@@ -203,19 +203,13 @@ def mm_factory(fsd_ready, tmp_path):
 
 @pytest.fixture
 def vcu(can_ready, ros):
-    """L2 状态源：仿真接口自动驱动 vcu_sim；真实接口观察等待人工操作."""
+    """L3/L4 模式源：仿真接口自动驱动 vcu_sim 选模式；真实接口观察等待人工操作."""
     if not _is_sim(can_ready):
         yield None
         return
-    from hil_test.can_socket import CanSocket
     from hil_test.vcu_sim import VcuSim
     sim = VcuSim(can_ready, _config_path('protocol.yaml'))
     if not sim.start():
         pytest.skip('vcu_sim 无法启动')
-    # 模拟工控机上线（0x210 Signal3=1），使状态机推进到待命(9)
-    tx = CanSocket(can_ready)
-    if tx.open():
-        tx.send(sim._proto.tx['id'], sim._proto.encode_210(0.0, 0.0, True, False))
-        tx.close()
     yield sim
     sim.stop()

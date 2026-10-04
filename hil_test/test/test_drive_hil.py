@@ -1,9 +1,15 @@
 """L3 低速动态安全闭环（pytest，标记 motor + slow）.
 
-职责：AMI 直线加速模式选择 + RES Go 放行 + 低速驱动（轮子动）+ RES 急停立即停车——
-READY(1) → mission_mode_cmd=acceleration → RES Go 放行 → EXPLORE(3)
-→ controller 经 can_interface 上 CAN（0x210）输出驱动开度 → RES 急停
-→ /system/emergency=true + mission_state EMERGENCY(7) + 0x210 纵向清零。
+职责：AMI 直线加速模式选择 + 低速驱动（轮子动）——
+READY(1) → 选 mode 2 → 【本机解析 0x501 Byte1=2】 → 选模式即启动 → EXPLORE(3)
+→ 等待人工按 RES Go（VCU 侧放行；FSD 本身不需要 GO，见 bench.res_go_wait_sec）
+→ controller 经 can_interface 上 CAN（0x210）输出驱动开度。
+
+AMI 模式判据由测试自己用 BusMonitor 直接解析 0x501，不再依赖 can_interface 转发
+的 /system/mission_mode_cmd（那是一次性边沿 + 去重，测试侧每用例新建节点会漏收）。
+
+新协议：RES Go/急停不再经 CAN 0x501 下发（原 Byte1「VCU 状态」定义取消），
+上位机改为「选模式即启动」；急停通路由 L2 自检失败覆盖。
 
 目标车速由 hil_test.yaml bench.target_speed_mps 限制（默认 0.2 m/s 安全低速，
 先低后调），经 /planning/final_waypoints 的直路下发。
@@ -11,15 +17,16 @@ READY(1) → mission_mode_cmd=acceleration → RES Go 放行 → EXPLORE(3)
 台架模式（真实接口 + HIL_BENCH=1）：车辆架起通电，位姿/车速/路径/就绪信号
 由 hil_test 代发（/localization/pose、/chcnav/velocity、/planning/final_waypoints
 直路、/system/lidar_ready、/system/localization_ready、/system/devices_inspection）；
-AMI 选模式、RES Go、RES 急停为 VCU 侧真实信号，由人工操作
-（仿真接口下 vcu_sim 自动驱动）。
-vcan0 预演（仿真接口）无需 HIL_BENCH 门控，vcu_sim 自动驱动状态推进。
+AMI 选模式为 VCU 侧真实信号，由人工操作（仿真接口下 vcu_sim 自动选模式）。
+vcan0 预演（仿真接口）无需 HIL_BENCH 门控，vcu_sim 自动驱动。
 """
 
 import os
 import time
 
 import pytest
+
+from hil_test.bench_ui import pause_for_res_go
 
 
 def _sim_interface():
@@ -52,17 +59,48 @@ pytestmark = [
 ]
 
 
-def _human_wait(fsd_ready, topic, expected, timeout, hint):
-    """等待话题值；等待期间周期性打印人工操作提示与剩余时间."""
+def _human_wait(mon, proto, expect_mode, timeout, hint, inj=None,
+                state=None, state_mode=None):
+    """等待人工操作结果：**本机直接解析 0x501**，Byte1 达标即返回.
+
+    判据优先级：
+      1) 本机总线监听解析到的 0x501 Byte1 == expect_mode（主判据，见下）；
+      2) 电平证据 /system/mission_state == (state, state_mode)（兜底，需传 inj）。
+
+    为什么改用本机解析：原先等 can_interface 转发的话题 /system/mission_mode_cmd，
+    那是「边沿」信号——can_interface 仅在 0x501 模式字节「变化」时发布一次
+    （can_interface.cpp:151 去重 + :169 一次性发布，DDS volatile 不 latch）。
+    测试侧每个用例都新建节点，订阅建立晚于发布即永久漏收，且 AMI 停在原档位时
+    VCU 重发同值帧会被去重、压根不发，于是只能空等到超时（车辆侧其实早已接受
+    该模式）。改用 BusMonitor 直接读总线：VCU 只要在发帧，本机就能看到，
+    不经过 can_interface 的去重与一次性发布两跳。
+    """
     deadline = time.time() + timeout
-    print(f'\n[L3] 等待操作: {hint}（超时 {timeout:.0f}s）')
+    t_wait = time.monotonic()
+    print(f'\n[L3] 等待操作: {hint}（超时 {timeout:.0f}s）', flush=True)
     last_report = time.time()
     while time.time() < deadline:
-        fsd_ready.spin_once()
-        if fsd_ready.latest(topic) == expected:
+        if inj is not None:
+            inj.spin_once()
+        frame = mon.latest(proto.rx['id'])
+        if frame is not None and proto.decode_501(frame[1]) == expect_mode:
+            age = time.monotonic() - frame[0]
+            how = ('等待期间新到帧' if frame[0] >= t_wait
+                   else f'等待前已到达，帧龄 {age:.1f}s')
+            print(f'[L3]   本机 0x501 解析通过: Byte1={expect_mode}（{how}）',
+                  flush=True)
             return True
+        if state is not None and inj is not None:
+            cur_state, cur_mode = inj.latest_state_mode()
+            if cur_state == state and (state_mode is None or cur_mode == state_mode):
+                print(f'[L3]   状态证据通过: state={state} mode={cur_mode}'
+                      f'（耗时 {time.monotonic() - t_wait:.1f}s）', flush=True)
+                return True
         if time.time() - last_report >= 5.0:
-            print(f'[L3]   等待中… {hint}（剩余 {deadline - time.time():.0f}s）')
+            seen = ('未收到' if frame is None
+                    else f'Byte1={proto.decode_501(frame[1])}')
+            print(f'[L3]   等待中… {hint}（剩余 {deadline - time.time():.0f}s）'
+                  f'｜本机 0x501: {seen}', flush=True)
             last_report = time.time()
         time.sleep(0.2)
     return False
@@ -95,18 +133,11 @@ def _bus_longitudinal(mon, proto):
     return proto.decode_210(latest[1])['longitudinal']
 
 
-def _wait_bus_value(mon, proto, value, timeout):
-    """等待 0x210 纵向开度出现指定值（非零/零）."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _bus_longitudinal(mon, proto) == value:
-            return True
-        time.sleep(0.05)
-    return False
+def _enter_explore(fsd_ready, vcu, mon, proto):
+    """确保系统进入 EXPLORE(3)：已在则直接返回；否则按 AMI 直线加速走一遍.
 
-
-def _enter_explore(fsd_ready, vcu):
-    """确保系统进入 EXPLORE(3)：已在则直接返回；否则按 AMI 直线加速 + RES Go 走一遍.
+    新协议「选模式即启动」：选中 acceleration（0x501 Byte1=2）后 mission_manager
+    直接进 EXPLORE，无需 Go 放行。
 
     mission_manager 跨用例长驻（单实例），状态可能已推进到 EXPLORE(3) 且无回退
     路径；RosInjector 则每用例新建、缓存为空，故先 spin 探测当前状态再决定短路。
@@ -119,22 +150,22 @@ def _enter_explore(fsd_ready, vcu):
         '未进入 READY（需 mission_manager 运行）'
     if vcu is not None:
         vcu.set_mode(2)  # 仿真自动 AMI；真实接口人工在 AMI 上选直线加速
-    assert _human_wait(fsd_ready, '/system/mission_mode_cmd', 'acceleration', 30.0,
-                       '用 AMI 选择直线加速模式（2）'), \
-        '未收到 mission_mode_cmd=acceleration（真实 VCU 请用 AMI 选择直线加速）'
-    if vcu is not None:
-        vcu.request_go(True)  # 仿真自动 RES Go；真实接口人工按 RES Go
-    assert _human_wait(fsd_ready, '/system/start_command', True, 30.0,
-                       '按 RES Go 放行（VCU 进入驾驶态 10）'), \
-        '未收到 start_command=true（真实 VCU 请按 RES Go）'
+    assert _human_wait(mon, proto, 2, 30.0,
+                       '用 AMI 选择直线加速模式（2）'
+                       '（若 AMI 已停在 2 档，请先切到其它档再切回 2）',
+                       inj=fsd_ready, state=3, state_mode=2), \
+        '本机未在 0x501 上解析到 Byte1=2（直线加速），且状态未达 EXPLORE+ACCELERATION'
     assert fsd_ready.wait_for('/system/mission_state', 3, timeout=10.0), \
-        '收到 Go 后未进入 EXPLORE'
+        '选模式后未进入 EXPLORE（需「选模式即启动」；若本机 0x501 已解析到 Byte1=2 ' \
+        '却卡在这里，是 can_interface 对同值模式帧去重未转发，见 can_interface.cpp:151）'
+    # 台架：VCU 还需人工按 RES Go 放行才会执行 0x210；给操作员留出按键时间窗
+    pause_for_res_go('[L3]')
 
 
 @pytest.mark.integration
-def test_ami_acceleration_go(fsd_ready, vcu):
-    """AMI 直线加速 + RES Go 放行：READY → mission_mode_cmd=acceleration → EXPLORE."""
-    _enter_explore(fsd_ready, vcu)
+def test_ami_acceleration_go(fsd_ready, vcu, bus_monitor, protocol):
+    """AMI 直线加速：READY → 0x501 Byte1=2 → 选模式即启动 → EXPLORE."""
+    _enter_explore(fsd_ready, vcu, bus_monitor, protocol)
 
 
 @pytest.mark.integration
@@ -143,7 +174,7 @@ def test_low_speed_follow(fsd_ready, vcu, bus_monitor, protocol):
 
     车辆架起、目标车速 = bench.target_speed_mps（安全限速），故轮子会低速转动。
     """
-    _enter_explore(fsd_ready, vcu)
+    _enter_explore(fsd_ready, vcu, bus_monitor, protocol)
     fsd_ready.publish_waypoints_straight()  # 目标速度 = bench.target_speed_mps
     _drive_bench(fsd_ready, 0.0, 2.0)  # 车辆静止反馈 → 速度误差驱动输出
     driven = False
@@ -154,26 +185,3 @@ def test_low_speed_follow(fsd_ready, vcu, bus_monitor, protocol):
             break
         time.sleep(0.05)
     assert driven, '低速跟随期间 0x210 无驱动开度（controller 未参与或未闭环输出）'
-
-
-@pytest.mark.integration
-def test_emergency_stop(fsd_ready, vcu, bus_monitor, protocol):
-    """RES 急停：EXPLORE 运行态触发 → emergency=true、mission_state→EMERGENCY(7)，
-    且 1s 内 0x210 纵向开度清零（停发控制）。
-
-    EMERGENCY 为终态锁存，本用例置于文件末位、最后执行。
-    """
-    _enter_explore(fsd_ready, vcu)
-    _drive_bench(fsd_ready, 0.0, 1.0)  # 保持驱动（目标限速 > 反馈 0），以便验证清零
-    if vcu is not None:
-        vcu.set_emergency(True)  # 仿真自动触发；真实接口人工按 RES 急停
-    assert _human_wait(fsd_ready, '/system/emergency', True, 30.0,
-                       '按 RES 急停'), \
-        '未收到 emergency=true（真实 VCU 请按 RES 急停）'
-    assert fsd_ready.wait_for('/system/mission_state', 7, timeout=10.0), \
-        '急停后未进入 EMERGENCY(7)'
-    t0 = time.monotonic()  # 计时起点 = emergency 观测时刻（非等待前）
-    assert _wait_bus_value(bus_monitor, protocol, 32767, 5.0), '急停后 0x210 纵向未清零'
-    stop_time = bus_monitor.latest(protocol.tx['id'])[0] - t0
-    assert stop_time < 1.0, f'急停清零响应过慢: {stop_time:.2f}s'
-    print(f'\n[L3] 急停清零响应: {stop_time:.3f}s')

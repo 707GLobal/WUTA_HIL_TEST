@@ -81,13 +81,12 @@ def test_selfcheck_all_pass(mm_factory, fsd_ready):
 
 
 @pytest.mark.integration
-def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol, is_sim, interface):
+def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol):
     """从未上线：超过宽限期 → ok=false + failures，立即切 EMERGENCY，Signal3=0.
 
     本用例是 L2 在真实链路上唯一运行的故障用例（断流/锁存两条仅 vcan0）：
     FSD 侧（devices_inspection/mission_state）与 0x210 Signal3=0 之后，
-    真实链路再断言真实 VCU 的联动响应（0x501 Byte1=12）。
-    注意：真实 VCU 因此进入 EMERGENCY 并锁存，跑完须复位（见 README「真车运行与复位」）。
+    真实链路 VCU 侧的联动响应不再由协议回读断言（新协议 0x501 已无状态字节）。
     """
     mm_factory()
     # 不发布任何传感器数据：宽限 4s + 检查周期 1s + 余量
@@ -108,20 +107,6 @@ def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol, is_s
 
     assert _wait_until(_signal3_off, 1.0), \
         '自检失败后 0x210 Signal3 未置 0（VCU 不会切 EMERGENCY）'
-
-    # 真实链路：验证真实 VCU 收到 Signal3=0 后自身进 EMERGENCY（0x501 Byte1=12）。
-    # vcu_sim 不建模「Signal3=0 → EMERGENCY」该联动，故仿真接口下不做此断言。
-    if not is_sim:
-        assert bus_monitor.wait_for(protocol.rx['id'], timeout=10.0), \
-            '未收到 VCU 0x501 状态帧（真实链路需 VCU 上电，见 README「接入真实 VCU」）'
-
-        def _vcu_emergency():
-            latest = bus_monitor.latest(protocol.rx['id'])
-            return (latest is not None
-                    and latest[1][protocol.rx['state_byte']] == 12)
-
-        assert _wait_until(_vcu_emergency, 10.0), \
-            '真实 VCU 未进入 EMERGENCY（0x501 Byte1 未变为 12）'
 
 
 @pytest.mark.integration

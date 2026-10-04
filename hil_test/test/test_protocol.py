@@ -4,7 +4,9 @@ marker（L1 分两阶段执行，见 run_hil.py / hil_test.sh）：
   sim      - L1 pre：vcan 模拟 VCU（纯 CAN，无需 ROS/FSD）
   unit     - L1 pre：协议编解码单测（无需硬件）
   link     - L1 post：接口 up / 心跳 / fail-safe（需 can_interface 运行）
-  protocol - L1 post：ROS 集成，0x501→话题映射 / 0x210 定标透传（需 can_interface 运行）
+  protocol - L1 post：ROS 集成，0x501 模式→话题映射 / 0x210 定标透传（需 can_interface 运行）
+
+新协议：0x501 Byte1 = 测试模式，原 Byte1「VCU 状态」定义已取消（不再有 Go/急停）。
 """
 
 import time
@@ -20,13 +22,13 @@ def _require_sim_interface(interface, is_sim):
         pytest.skip(f'{interface} 非仿真接口，注入用例跳过（防污染真实 VCU）')
 
 
-def _inject_501(interface, protocol, state, mode=None, count=20):
-    """向总线注入 0x501 帧（FaultInjector）."""
+def _inject_501(interface, protocol, mode, count=20):
+    """向总线注入 0x501 模式帧（FaultInjector）."""
     from hil_test.fault_injector import FaultInjector
     fi = FaultInjector(interface, protocol.path)
     assert fi.open()
     try:
-        return fi.inject_state(state, mode=mode, count=count)
+        return fi.inject_mode(mode, count=count)
     finally:
         fi.close()
 
@@ -79,9 +81,8 @@ def test_online_finished_bytes(protocol):
 
 @pytest.mark.unit
 def test_decode_501(protocol):
-    """0x501 解析：Byte1 状态、Byte2 模式."""
-    state, mode = protocol.decode_501(bytes([12, 3, 0, 0, 0, 0, 0, 0]))
-    assert (state, mode) == (12, 3)
+    """0x501 解析：Byte1 测试模式（原状态字节已取消）."""
+    assert protocol.decode_501(bytes([3, 0, 0, 0, 0, 0, 0, 0])) == 3
 
 
 @pytest.mark.unit
@@ -100,50 +101,19 @@ def test_mode_topic_map(protocol):
 
 @pytest.mark.sim
 def test_sim_501_event(vcu_sim, bus_monitor, protocol):
-    """VCU 模拟：状态/模式变化时发帧（事件驱动，无周期心跳）."""
-    assert bus_monitor.wait_for(protocol.rx['id'], timeout=3.0)
+    """VCU 模拟：模式变化时发帧（事件驱动，无周期心跳），Byte1=模式.
 
+    vcu_sim 启动时已发过首帧（mode=1），该帧可能早于 bus_monitor 打开而错过；
+    事件驱动语义下只有模式变化才会再发，故先切一次模式触发新帧再断言。
+    """
     def _mode_is(mode):
         frame = bus_monitor.latest(protocol.rx['id'])
         return frame is not None and frame[1][protocol.rx['mode_byte']] == mode
 
-    def _state_is(state):
-        frame = bus_monitor.latest(protocol.rx['id'])
-        return frame is not None and frame[1][protocol.rx['state_byte']] == state
-
     vcu_sim.set_mode(3)
-    assert _wait_until(lambda: _mode_is(3), 2.0), '模式变化后未收到 0x501'
-    vcu_sim.set_emergency(True)
-    assert _wait_until(lambda: _state_is(12), 2.0), '状态变化后未收到 0x501'
-
-
-@pytest.mark.sim
-def test_sim_online_advance(vcu_sim, interface, protocol):
-    """VCU 模拟：上线(0x210 Signal3=1) 后 6→9；请求出发 → 10."""
-    from hil_test.can_socket import CanSocket
-    tx = CanSocket(interface)
-    assert tx.open()
-    try:
-        assert vcu_sim.state == 6
-        tx.send(protocol.tx['id'], protocol.encode_210(0.0, 0.0, True, False))
-        assert _wait_until(lambda: vcu_sim.state == 9, 2.0)
-        vcu_sim.request_go()
-        assert _wait_until(lambda: vcu_sim.state == 10, 2.0)
-    finally:
-        tx.close()
-
-
-@pytest.mark.sim
-def test_sim_state_override(vcu_sim):
-    """VCU 模拟：状态优先级 EMERGENCY(12) > FINISHED(11) > DRIVING(10)."""
-    vcu_sim.set_finished(True)
-    assert vcu_sim.state == 11
-    vcu_sim.set_emergency(True)
-    assert vcu_sim.state == 12
-    vcu_sim.set_emergency(False)
-    assert vcu_sim.state == 11
-    vcu_sim.set_finished(False)
+    assert _wait_until(lambda: _mode_is(3), 3.0), '模式变化后未收到 0x501'
     vcu_sim.set_mode(6)
+    assert _wait_until(lambda: _mode_is(6), 3.0), '模式再变化后未收到 0x501'
     assert vcu_sim.mode == 6
 
 
@@ -178,30 +148,12 @@ def test_link_210_heartbeat(fsd_ready, bus_monitor, protocol):
 
 @pytest.mark.protocol
 @pytest.mark.integration
-def test_501_go_trigger(fsd_ready, protocol, interface, is_sim):
-    """Go 触发：0x501 state=10 → /system/start_command=true."""
-    _require_sim_interface(interface, is_sim)
-    assert _inject_501(interface, protocol, state=10) > 0
-    assert fsd_ready.wait_for('/system/start_command', True, timeout=5.0)
-
-
-@pytest.mark.protocol
-@pytest.mark.integration
-def test_501_emergency_trigger(fsd_ready, protocol, interface, is_sim):
-    """急停触发：0x501 state=12 → /system/emergency=true."""
-    _require_sim_interface(interface, is_sim)
-    assert _inject_501(interface, protocol, state=12) > 0
-    assert fsd_ready.wait_for('/system/emergency', True, timeout=5.0)
-
-
-@pytest.mark.protocol
-@pytest.mark.integration
 def test_501_mode_mapping(fsd_ready, protocol, interface, is_sim):
-    """模式映射：Byte2=2/3/4/5/6 → mission_mode_cmd."""
+    """模式映射：Byte1=2/3/4/5/6 → mission_mode_cmd."""
     _require_sim_interface(interface, is_sim)
     for mode, expect in ((2, 'acceleration'), (3, 'trackdrive'),
                          (4, 'skidpad'), (5, 'ebs_test'), (6, 'inspection')):
-        assert _inject_501(interface, protocol, state=9, mode=mode) > 0
+        assert _inject_501(interface, protocol, mode=mode) > 0
         assert fsd_ready.wait_for('/system/mission_mode_cmd', expect, timeout=5.0), \
             f'mode {mode} 未映射为 {expect}'
 
@@ -209,13 +161,13 @@ def test_501_mode_mapping(fsd_ready, protocol, interface, is_sim):
 @pytest.mark.protocol
 @pytest.mark.integration
 def test_501_mode1_ignored(fsd_ready, protocol, interface, is_sim):
-    """操控性模式：Byte2=1 不改动 mission_mode_cmd."""
+    """操控性模式：Byte1=1 不改动 mission_mode_cmd."""
     _require_sim_interface(interface, is_sim)
     # 先设一个已知模式，再注入 1，确认值不变
-    assert _inject_501(interface, protocol, state=9, mode=3) > 0
+    assert _inject_501(interface, protocol, mode=3) > 0
     assert fsd_ready.wait_for('/system/mission_mode_cmd', 'trackdrive', timeout=5.0)
     before = fsd_ready.latest('/system/mission_mode_cmd')
-    assert _inject_501(interface, protocol, state=9, mode=1) > 0
+    assert _inject_501(interface, protocol, mode=1) > 0
     time.sleep(0.5)
     fsd_ready.spin_once()
     assert fsd_ready.latest('/system/mission_mode_cmd') == before

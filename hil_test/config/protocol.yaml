@@ -29,25 +29,14 @@ tx_210:
 # VCU → 工控机（接收）
 rx_501:
   id: 0x501
-  # 事件驱动：VCU 在状态/模式变化时发帧，无固定周期（旧"10Hz 心跳"为测试侧假定，待与 VCU 确认）
+  # 实测（2026-10-03 台架，BusMonitor 落盘统计）：VCU 以 10Hz 周期重发当前模式字节，
+  # 载荷恒定（106 帧/10.5s，周期 0.095~0.106s，如 06 00 00 00 00 00 00 00）。
+  # 即模式是「电平」信号而非事件——can_interface 的去重只应作用于转发时机，
+  # 不能假定"只发一次"；晚启动的 mission_manager 需要靠保活重发追上。
   dlc: 8
-  state_byte: 0           # Byte1: VCU 状态
-  mode_byte: 1            # Byte2: 测试模式
-  states:
-    0: SILENT
-    1: MANNED_WAIT_HV
-    2: MANNED_WAIT_CTRL
-    3: MANNED_WAIT_START
-    4: MANNED_DRIVING
-    5: MANNED_ERROR
-    6: UNMANNED_WAIT_HV
-    7: UNMANNED_WAIT_CTRL
-    8: UNMANNED_COOLING
-    9: UNMANNED_STANDBY
-    10: UNMANNED_DRIVING   # AS_DRIVING  → /system/start_command=true
-    11: UNMANNED_FINISHED  # AS_FINISHED → 仅日志
-    12: UNMANNED_EMERGENCY # AS_EMERGENCY → /system/emergency=true
-  mode_topic_map:         # Byte2 → mission_mode_cmd 字符串；null = 忽略
+  # 新协议：取消原 Byte1「VCU 状态」定义，原 Byte2「测试模式」提升到 Byte1
+  mode_byte: 0            # Byte1: 测试模式
+  mode_topic_map:         # Byte1 → mission_mode_cmd 字符串；null = 忽略
     1: null               # 操控性测试（有人驾驶，与无人算法无关）
     2: acceleration
     3: trackdrive

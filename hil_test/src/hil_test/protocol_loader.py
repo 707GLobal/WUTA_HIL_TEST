@@ -50,8 +50,11 @@ class Protocol:
 
     # ---- 解析 0x501（VCU→工控机）----
     def decode_501(self, data):
-        """解析 0x501：返回 (状态 Byte1, 测试模式 Byte2)."""
-        return data[self.rx['state_byte']], data[self.rx['mode_byte']]
+        """解析 0x501：返回测试模式（Byte1）.
+
+        新协议：原 Byte1「VCU 状态」定义已取消，原 Byte2「测试模式」提升到 Byte1。
+        """
+        return data[self.rx['mode_byte']]
 
     def mode_topic(self, mode):
         """测试模式 → mission_mode_cmd 字符串；None 表示忽略（操控性=有人驾驶）."""

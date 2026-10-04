@@ -2,8 +2,8 @@
 
 发布 FSD 输入话题（/control/command、/system/mission_state、/system/devices_inspection、
 /system/mission_complete、/chcnav/velocity 台架车速源、传感器数据心跳），订阅
-can_interface/mission_manager 输出话题（/system/start_command、/system/emergency、
-/system/mission_mode_cmd、/system/mission_state、/system/devices_inspection）供断言。
+can_interface/mission_manager 输出话题（/system/emergency、/system/mission_mode_cmd、
+/system/mission_state、/system/devices_inspection）供断言。
 
 HIL 台架模式代发（车辆架起，传感器仅保在线）：
   /system/lidar_ready、/system/localization_ready、/localization/pose、
@@ -96,10 +96,7 @@ class RosInjector:
         self._pub_camera_data = self._node.create_publisher(
             Image, '/zed2i/zed_node/left/image_rect_color', 10)
 
-        # 断言订阅器
-        self._node.create_subscription(
-            Bool, '/system/start_command',
-            lambda m: self._on('/system/start_command', m.data), 10)
+        # 断言订阅器（/system/emergency 由 mission_manager 自检失败路径发布）
         self._node.create_subscription(
             Bool, '/system/emergency',
             lambda m: self._on('/system/emergency', m.data), 10)
@@ -108,7 +105,7 @@ class RosInjector:
             lambda m: self._on('/system/mission_mode_cmd', m.data), 10)
         self._node.create_subscription(
             MissionState, '/system/mission_state',
-            lambda m: self._on('/system/mission_state', m.state), 10)
+            self._on_mission_state, 10)
         self._node.create_subscription(
             DevicesInspection, '/system/devices_inspection',
             lambda m: self._on('/system/devices_inspection',
@@ -118,6 +115,16 @@ class RosInjector:
 
     def _on(self, topic, value):
         self._latest[topic] = (time.time(), value)
+
+    def _on_mission_state(self, msg):
+        """mission_manager 10Hz 周期广播：state 为主判据，mission_mode 另存一份.
+
+        与 /system/mission_mode_cmd（can_interface 仅在 0x501 模式字节变化时
+        发布一次的边沿信号，volatile 不 latch，可能永久漏收）不同，本话题是
+        周期广播的电平信号，随时可轮询到当前真实状态。
+        """
+        self._on('/system/mission_state', msg.state)
+        self._on('/system/mission_state_mode', msg.mission_mode)
 
     def spin_once(self):
         """处理一次订阅回调."""
@@ -230,6 +237,11 @@ class RosInjector:
         """最近收到的话题值；未收到返回 None."""
         entry = self._latest.get(topic)
         return None if entry is None else entry[1]
+
+    def latest_state_mode(self):
+        """最近 /system/mission_state 的 (state, mission_mode)；未收到返回 (None, None)."""
+        return (self.latest('/system/mission_state'),
+                self.latest('/system/mission_state_mode'))
 
     def wait_for(self, topic, expected, timeout=5.0):
         """轮询等待话题值等于 expected；成功返回 True，超时 False."""

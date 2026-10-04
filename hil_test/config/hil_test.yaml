@@ -12,10 +12,15 @@ bench:
   # 取 FSD controller.yaml 的 inspection_speed。
   target_speed_mps: 0.2
 
+  # 台架人工按 RES Go 的等待窗（s）：选完 AMI 档位后 VCU 还需 RES Go 放行才会
+  # 执行 0x210 指令，此窗口给操作员留出按键时间。仅等待+提示，不参与断言；
+  # 新协议 0x501 无 VCU 状态字节，无法做事件驱动等待。<=0 关闭。
+  res_go_wait_sec: 10.0
+
 test:
   frames:
     - id: 0x210          # 工控机→VCU 10Hz 保活（本机职责，周期可判定）
       period_ms: 100
-    - id: 0x501          # VCU→工控机 状态帧（事件驱动，无心跳、不判周期）
+    - id: 0x501          # VCU→工控机 模式帧（实测 10Hz 周期重发同一档位，不判周期）
   period_tolerance_ratio: 0.2  # 周期容差（±20%），仅适用于 0x210 保活
   ros_timeout_sec: 5.0         # ROS 话题等待/断言超时

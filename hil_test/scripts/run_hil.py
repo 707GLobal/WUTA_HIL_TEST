@@ -5,7 +5,7 @@
       pre  —— 协议编解码单测 + vcu_sim 模型（不依赖 FSD，脚本不起任何节点）
       post —— 链路自检 + 0x501/0x210 协议集成（需 can_interface）
   L2 传感器自检故障模拟（selfcheck，故障即切 EMERGENCY，断电层）
-  L3 AMI 模式选择与放行 + RES 急停（motor：AMI 选直线加速 + RES Go → EXPLORE → 急停 EMERGENCY，通电层）
+  L3 AMI 模式选择 + 低速驱动（motor：AMI 选直线加速 → 选模式即启动 → EXPLORE，通电层）
   L4 车检任务全链路（inspection：AMI 直选车检模式，通电层）
 
 L1 分两阶段的原因：vcu_sim 模型用例需要一个"干净"的总线，若与 can_interface
@@ -48,7 +48,7 @@ LEVELS = {
         'post': ('test_protocol.py', 'link or protocol'),  # 链路自检 + 协议集成（需 FSD）
     },
     'L2': {'only': ('test_selfcheck.py', 'selfcheck')},    # 传感器自检故障模拟（断电层）
-    'L3': {'only': ('test_drive_hil.py', 'motor')},        # AMI 模式选择与放行 + RES 急停（通电层）
+    'L3': {'only': ('test_drive_hil.py', 'motor')},        # AMI 模式选择 + 低速驱动（通电层）
     'L4': {'only': ('test_inspection.py', 'inspection')},  # 车检任务全链路（通电层）
 }
 
@@ -76,9 +76,15 @@ def main():
     env['HIL_INTERFACE'] = interface
     env['HIL_CONFIG'] = os.path.join(ROOT, 'config')
 
-    cmd = [sys.executable, '-m', 'pytest',
+    # L3/L4 需人工操作，等待提示（等待中…剩余 Ns）必须实时可见：pytest 默认捕获
+    # print，用例结束才吐（仅失败时显示），人工会看不到提示而空等超时。
+    #   --capture=tee-sys  tee 到真实 stdout，同时保留捕获（失败报告仍有 Captured stdout）
+    #   -u                 必须配合：TeeCaptureIO 只转发 write、不转发 flush，非 tty
+    #                      （重定向到文件/管道）时真实 stdout 仍块缓冲，提示会迟到几十秒
+    cmd = [sys.executable, '-u', '-m', 'pytest',
            os.path.join(ROOT, 'test', test_file),
-           '-m', marker, '-q', '--tb=long', '-p', 'no:cacheprovider', '-ra']
+           '-m', marker, '-q', '--tb=long', '-p', 'no:cacheprovider', '-ra',
+           '--capture=tee-sys']
     rc = subprocess.call(cmd, env=env)  # 输出直通终端
     raise SystemExit(rc)
 
