@@ -5,7 +5,7 @@
 # 工控机 → VCU（发送）
 tx_210:
   id: 0x210
-  period_ms: 100          # 10Hz 保活
+  period_ms: 100          # 10Hz 保活（首份 devices_inspection 后开闸，开闸前静默）
   dlc: 8
   max_steer_deg: 25.0     # Signal2 满量程转向角（与 can_interface max_steer_deg 一致）
   signals:
@@ -15,16 +15,27 @@ tx_210:
       center: 32767
       min: 10
       max: 65525
-    lateral:              # Signal2 横向控制（10=左、65525=右）Byte3-4
+    lateral:              # Signal2 横向控制（0=满左、65535=满右，中心 32762）Byte3-4
       bytes: [2, 3]
       little_endian: true
-      center: 32767
-      min: 10
-      max: 65525
+      center: 32762
+      min: 0
+      max: 65535
     online:               # Signal3 工控机上线 Byte5
       byte: 4
     finished:             # Signal4 任务已完成 Byte6
       byte: 5
+
+# 工控机 → VCU（发送）：上线心跳
+# 与 0x210 Signal3 同源（can_interface 的 can_online_，即 /system/devices_inspection.ok），
+# 但独立成帧且不受 0x210 开闸门控：节点启动即发，首份自检结论前 Data[0]=0x00。
+tx_301:
+  id: 0x301
+  dlc: 1                  # 只发 1 字节
+  period_ms: 50           # 20Hz
+  online_byte: 0          # Data[0]
+  online_value: 0x01      # 正常/在线
+  offline_value: 0x00     # 异常/离线（含首份自检结论未到）
 
 # VCU → 工控机（接收）
 rx_501:

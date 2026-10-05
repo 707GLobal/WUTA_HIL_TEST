@@ -53,37 +53,59 @@ def _inject_1e4(interface, protocol, state, count=1):
 
 @pytest.mark.unit
 def test_scale_center(protocol):
-    """定标中心点：0 控制 → 32767."""
+    """定标中心点：纵向 0 → 32767；横向 0°（回正）→ 32762."""
     data = protocol.encode_210(0.0, 0.0, False, False)
-    assert data[:2] == ZERO_LE and data[2:4] == ZERO_LE
+    assert data[:2] == ZERO_LE
+    assert data[2:4] == bytes([0xFA, 0x7F])   # 32762 小端
 
 
 @pytest.mark.unit
 def test_little_endian(protocol):
     """字节序：小端，Byte1=低字节."""
-    # 纵向满驱动 scale(1)=65525=0xFFF5 → [F5 FF]；横向左满 scale(-1)=10 → [0A 00]
+    # 纵向满驱动 65525=0xFFF5 → [F5 FF]；横向满左（+25°）→ 0 = [00 00]
     data = protocol.encode_210(1.0, 25.0, False, False)
     assert data[:2] == bytes([0xF5, 0xFF])
-    assert data[2:4] == bytes([0x0A, 0x00])
+    assert data[2:4] == bytes([0x00, 0x00])
+    # 横向满右（-25°）→ 65535 = [FF FF]
+    data = protocol.encode_210(0.0, -25.0, False, False)
+    assert data[2:4] == bytes([0xFF, 0xFF])
 
 
 @pytest.mark.unit
 def test_clamp_out_of_range(protocol):
-    """越界钳位：[10, 65525]."""
+    """越界钳位：纵向 [10, 65525]；横向 [0, 65535]."""
     data = protocol.encode_210(5.0, 0.0, False, False)
     assert data[:2] == bytes([0xF5, 0xFF])
     data = protocol.encode_210(-5.0, 0.0, False, False)
     assert data[:2] == bytes([0x0A, 0x00])
+    assert protocol.decode_210(protocol.encode_210(0.0, 90.0, False, False))['lateral'] == 0
+    assert protocol.decode_210(protocol.encode_210(0.0, -90.0, False, False))['lateral'] == 65535
 
 
 @pytest.mark.unit
 def test_mid_scale(protocol):
-    """中值定标：与 C++ scaleControl 一致."""
-    from hil_test.protocol_loader import scale_control
+    """中值定标：与 C++ scaleLongitudinal / scaleLateral 一致."""
+    from hil_test.protocol_loader import scale_control, scale_lateral
     data = protocol.encode_210(0.5, 0.0, False, False)
     assert protocol.decode_210(data)['longitudinal'] == scale_control(0.5)
-    data = protocol.encode_210(0.0, -12.5, False, False)  # 右半圈
-    assert protocol.decode_210(data)['lateral'] == scale_control(0.5)
+    data = protocol.encode_210(0.0, -12.5, False, False)  # 右半圈（12.5° 右）
+    assert protocol.decode_210(data)['lateral'] == scale_lateral(-12.5, protocol.max_steer_deg)
+
+
+@pytest.mark.unit
+def test_lateral_scaling(protocol):
+    """Signal2 新规格：0~65535、32762 为中心；0=满左、65535=满右."""
+    from hil_test.protocol_loader import scale_lateral
+    m = protocol.max_steer_deg
+    assert scale_lateral(0.0, m) == 32762      # 回正
+    assert scale_lateral(+m, m) == 0           # 满左
+    assert scale_lateral(-m, m) == 65535       # 满右
+    # 车检幅值 15°：左半段跨度 32762、右半段 32773
+    assert scale_lateral(+15.0, m) == 13104
+    assert scale_lateral(-15.0, m) == 52425
+    # protocol.yaml 的横向定义必须与实现一致（防漂移）
+    lat = protocol.tx['signals']['lateral']
+    assert (lat['center'], lat['min'], lat['max']) == (32762, 0, 65535)
 
 
 @pytest.mark.unit
@@ -99,6 +121,16 @@ def test_online_finished_bytes(protocol):
 def test_decode_501(protocol):
     """0x501 解析：Byte1 测试模式（原状态字节已取消）."""
     assert protocol.decode_501(bytes([3, 0, 0, 0, 0, 0, 0, 0])) == 3
+
+
+@pytest.mark.unit
+def test_decode_301(protocol):
+    """0x301 心跳配置：ID/DLC=1/20Hz，Data[0]=0x01 在线、0x00 离线."""
+    assert protocol.hb['id'] == 0x301
+    assert protocol.hb['dlc'] == 1
+    assert protocol.hb['period_ms'] == 50          # 20Hz
+    assert protocol.decode_301(bytes([0x01])) == protocol.hb['online_value']
+    assert protocol.decode_301(bytes([0x00])) == protocol.hb['offline_value']
 
 
 @pytest.mark.unit
@@ -204,6 +236,19 @@ def _wait_until(predicate, timeout):
     return False
 
 
+def _arm_210_tx(inj, mon, proto, timeout=2.0):
+    """开闸 0x210：注入首份自检结论（ok=true）→ can_interface 开始发送.
+
+    与台架一致（L3/L4 的 _enable_bench 同一步）：发送门控要求先有自检结论，
+    否则开机默认 Signal3=0 会被 VCU 当作「工控机未上线/自检故障」。
+    """
+    inj.publish_devices_inspection(ok=True)
+    if not mon.wait_for(proto.tx['id'], timeout=timeout):
+        inj.publish_devices_inspection(ok=True)  # DDS 首包偶发丢失，重发一次
+        assert mon.wait_for(proto.tx['id'], timeout=timeout), \
+            '注入自检结论后 0x210 仍未开始发送（检查 can_interface 的发送门控）'
+
+
 # ================= L1 post · 链路自检（需 can_interface 运行） =================
 
 @pytest.mark.link
@@ -213,13 +258,76 @@ def test_link_can_interface_up(can_ready):
 
 
 @pytest.mark.link
+def test_link_301_heartbeat_offline_before_inspection(bus_monitor, protocol):
+    """0x301 心跳启动即发：首份自检结论前 DLC=1、Data[0]=0x00.
+
+    只读总线、不注入自检结论，故不影响紧随其后的
+    test_link_210_gate_until_inspection（后者须为第一个开闸者）。
+    """
+    hb = protocol.hb
+    # 不受 0x210 门控限制：节点启动即发，2s 内应能收到
+    assert bus_monitor.wait_for(hb['id'], timeout=2.0), \
+        '启动后未收到 0x301 心跳（应不受 0x210 开闸门控限制）'
+    _, data = bus_monitor.latest(hb['id'])
+    assert len(data) == hb['dlc'] == 1, f'0x301 DLC 应为 1，实测 {len(data)}'
+    assert protocol.decode_301(data) == hb['offline_value'], \
+        '首份自检结论前 0x301 Data[0] 应为 0x00（尚未确认上线）'
+
+
+@pytest.mark.link
 @pytest.mark.integration
-def test_link_210_heartbeat(fsd_ready, bus_monitor, protocol):
-    """工控机→VCU 心跳：0x210 10Hz 保活."""
-    assert bus_monitor.wait_for(protocol.tx['id'], timeout=3.0)
+def test_link_210_gate_until_inspection(fsd_ready, bus_monitor, protocol):
+    """发送门控：首份自检结论到达前 0x210 一帧不发，注入后 10Hz 保活.
+
+    **位置敏感**：须为本层第一个访问总线的用例（can_interface 每进程只开一次闸）。
+    背景：进程启动到首份自检结论之间有 2~3s，此前会以默认 Signal3=0 持续发帧，
+    VCU 侧表现为「工控机未上线」。
+    """
+    assert not bus_monitor.wait_for(protocol.tx['id'], timeout=1.0), (
+        '首份自检结论前总线上已有 0x210：发送门控失效、本层已有用例注入过自检结论，'
+        '或存在遗留 can_interface 进程（pgrep -af can_interface_node）')
+    _arm_210_tx(fsd_ready, bus_monitor, protocol, timeout=1.0)
+    assert protocol.decode_210(bus_monitor.latest(protocol.tx['id'])[1])['online'] == 1, \
+        '开闸首帧 Signal3 应为 1（首份 ok=True 结论未随帧发出）'
     time.sleep(1.1)
     stats = bus_monitor.period_stats(protocol.tx['id'])
     assert stats is not None and 0.06 <= stats['avg'] <= 0.14
+
+
+@pytest.mark.link
+@pytest.mark.integration
+def test_link_210_heartbeat(fsd_ready, bus_monitor, protocol):
+    """工控机→VCU 心跳：注入自检结论后 0x210 10Hz 保活."""
+    _arm_210_tx(fsd_ready, bus_monitor, protocol)
+    time.sleep(1.1)
+    stats = bus_monitor.period_stats(protocol.tx['id'])
+    assert stats is not None and 0.06 <= stats['avg'] <= 0.14
+
+
+@pytest.mark.link
+@pytest.mark.integration
+def test_link_301_heartbeat_online(fsd_ready, bus_monitor, protocol):
+    """0x301 心跳：开闸后 20Hz（50ms±20%）、DLC=1，Data[0] 随自检结论翻转."""
+    hb = protocol.hb
+    bus_monitor.clear()
+    _arm_210_tx(fsd_ready, bus_monitor, protocol)   # 注入 ok=True → can_online_=1
+    assert bus_monitor.wait_for(hb['id'], timeout=2.0), '开闸后未收到 0x301 心跳'
+    time.sleep(1.1)
+    stats = bus_monitor.period_stats(hb['id'])
+    assert stats is not None and 0.04 <= stats['avg'] <= 0.06, \
+        f'0x301 周期应约 50ms（20Hz），实测 {stats}'
+    _, data = bus_monitor.latest(hb['id'])
+    assert len(data) == 1 and protocol.decode_301(data) == hb['online_value'], \
+        '自检 ok=True 后 0x301 Data[0] 应为 0x01'
+
+    # 自检失败 → 心跳应回 0x00（与 0x210 Signal3 同源翻转）
+    bus_monitor.clear()
+    fsd_ready.publish_devices_inspection(ok=False)
+    time.sleep(0.3)
+    _, data = bus_monitor.latest(hb['id'])
+    assert data is not None and protocol.decode_301(data) == hb['offline_value'], \
+        '自检 ok=False 后 0x301 Data[0] 应回 0x00'
+    fsd_ready.publish_devices_inspection(ok=True)   # 复位电平，避免影响后续用例
 
 
 # ================= L1 post · ROS 集成（需 can_interface 运行 + vcan0 注入） =================
@@ -259,7 +367,8 @@ def test_210_scaling_from_command(fsd_ready, bus_monitor, protocol):
     0x210 为 10Hz 保活，命令生效前的旧帧可能先到总线；
     故轮询等待携带新定标值的帧，而非「出现任意一帧」即断言。
     """
-    from hil_test.protocol_loader import scale_control
+    from hil_test.protocol_loader import scale_control, scale_lateral
+    _arm_210_tx(fsd_ready, bus_monitor, protocol)
     fsd_ready.publish_command(speed=0.0, angle=12.5, throttle_brake=0.5)
     expect_long = scale_control(0.5)
 
@@ -271,7 +380,7 @@ def test_210_scaling_from_command(fsd_ready, bus_monitor, protocol):
     assert _wait_until(_got_scaled_frame, 3.0), \
         f'0x210 纵向未按 throttle_brake 定标: {bus_monitor.latest(protocol.tx["id"])}'
     dec = protocol.decode_210(bus_monitor.latest(protocol.tx['id'])[1])
-    assert dec['lateral'] == scale_control(-12.5 / protocol.max_steer_deg)
+    assert dec['lateral'] == scale_lateral(12.5, protocol.max_steer_deg)
 
 
 @pytest.mark.protocol

@@ -266,6 +266,7 @@ run_level() {
   export HIL_CONFIG="$HIL_CFG"
   export HIL_MM_PARAMS="$MM_PARAMS"        # L2/L4 用例自管 mission_manager 用
   export HIL_MM_HIL_PARAMS="$MM_HIL_PARAMS"
+  export HIL_CTRL_PARAMS="$CTRL_PARAMS"    # L4 从 controller.yaml 推导车检期望值
   if [ "$BENCH" -eq 1 ]; then
     export HIL_BENCH=1
   fi

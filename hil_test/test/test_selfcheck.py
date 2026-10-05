@@ -56,6 +56,12 @@ def _wait_until(predicate, timeout):
     return False
 
 
+def _signal3(mon, proto):
+    """最近一帧 0x210 的 Signal3（Byte5，1=上线/0=未上线）；无帧返回 None."""
+    latest = mon.latest(proto.tx['id'])
+    return None if latest is None else int(proto.decode_210(latest[1])['online'])
+
+
 def _require_sim_fault(is_sim, interface):
     """断流/锁存故障用例仅仿真接口运行.
 
@@ -110,19 +116,26 @@ def test_never_online_timeout(mm_factory, fsd_ready, bus_monitor, protocol):
 
 
 @pytest.mark.integration
-def test_mid_stream_dropout(mm_factory, fsd_ready, is_sim, interface):
+def test_mid_stream_dropout(mm_factory, fsd_ready, is_sim, interface,
+                           bus_monitor, protocol):
     """中途断流：先上线再停发 → 超过 sensor_timeout 2s 判故障并切 EMERGENCY.
 
     仅 vcan0：真实链路制造断流需停真实传感器且会给 VCU 下发 Signal3=0（见 _require_sim_fault）。
+    同时覆盖 0x210 发送的两段语义：上线开闸（Signal3=1）→ 故障后再置 0。
     """
     _require_sim_fault(is_sim, interface)
     mm_factory()
-    _feed_sensors(fsd_ready, 2.5)  # 全部上线（宽限期内）
+    _feed_sensors(fsd_ready, 2.5)  # 全部上线（宽限期内）→ 首份 ok=true 开闸
+    assert _wait_until(lambda: _signal3(bus_monitor, protocol) == 1, 1.0), \
+        '自检通过开闸后 0x210 Signal3 未置 1'
     expected = (False, ('lidar', 'imu', 'camera'))
     assert fsd_ready.wait_for('/system/devices_inspection', expected, timeout=8.0), \
         '断流后未上报自检失败'
     assert fsd_ready.wait_for('/system/mission_state', STATE_EMERGENCY, timeout=3.0), \
         '断流后未立即切 EMERGENCY'
+    # 已开闸后出故障：Signal3 必须回 0（发送门控只挡开机空窗，不吞后续故障）
+    assert _wait_until(lambda: _signal3(bus_monitor, protocol) == 0, 1.0), \
+        '断流判故障后 0x210 Signal3 未置 0'
 
 
 @pytest.mark.integration

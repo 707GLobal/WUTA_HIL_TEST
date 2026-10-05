@@ -22,7 +22,7 @@ _CONFIG_DIR = os.environ.get(
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))), 'config'))
 
-_DEFAULT_TIMEOUT_SEC = 30.0
+_DEFAULT_TIMEOUT_SEC = 60.0
 
 
 def _bench_cfg(key, default):

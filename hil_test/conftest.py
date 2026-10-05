@@ -69,6 +69,50 @@ def pytest_configure(config):
         config.addinivalue_line('markers', marker)
 
 
+# ---------------------------------------------------------------------------
+# 结果统计：全部用例被跳过 / 一条都没收集到 → 判为未通过
+#
+# pytest 对「全 skip」返回退出码 0，脚本只看退出码会把「什么都没跑」报成「通过」。
+# 而 skip 恰恰覆盖了最容易误判的路径：L3/L4 忘带 -n（HIL_BENCH 门控）、can 接口
+# 不在（can_ready）、can_interface/mission_manager 没起来（fsd_ready / mm_factory）、
+# vcan0 未创建。故在会话收尾把这种「零通过」改成失败。
+# ---------------------------------------------------------------------------
+_OUTCOMES = {'passed': 0, 'failed': 0, 'error': 0, 'skipped': 0}
+
+
+def pytest_runtest_logreport(report):
+    if report.skipped:
+        _OUTCOMES['skipped'] += 1
+    elif report.failed:
+        if report.when == 'call':
+            _OUTCOMES['failed'] += 1
+        else:
+            _OUTCOMES['error'] += 1
+    elif report.when == 'call' and report.passed:
+        _OUTCOMES['passed'] += 1
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """没有一条用例真正通过时强制判未通过（failures/errors 保持原样）."""
+    if _OUTCOMES['failed'] or _OUTCOMES['error']:
+        return
+    collected = getattr(session, 'testscollected', 0)
+    if collected == 0:
+        reason = '本层没有收集到任何用例（检查测试文件/marker 选择）'
+    elif _OUTCOMES['passed'] == 0:
+        reason = (f"本层 {_OUTCOMES['skipped']}/{collected} 条用例全部被跳过，"
+                  '没有一条真正执行（真实台架记得加 -n/--bench，并确认 can 接口'
+                  '与 FSD 节点已就绪）')
+    else:
+        return
+    session.exitstatus = 1
+    reporter = session.config.pluginmanager.get_plugin('terminalreporter')
+    if reporter is not None:
+        reporter.write_line(f'!! {reason} → 判为未通过', red=True)
+    else:  # pragma: no cover - 无终端插件时的兜底
+        print(f'!! {reason} → 判为未通过')
+
+
 @pytest.fixture
 def protocol():
     """协议编解码实例（纯逻辑，无需硬件）."""

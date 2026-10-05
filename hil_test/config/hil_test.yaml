@@ -9,17 +9,18 @@ bench:
   # L3 台架安全限速（唯一旋钮，先低后调）。台架反馈车速代发为 0，
   # 该值经 waypoints 成为 controller 目标速度，并近似等比例决定纵向开度，
   # 故须保持低位以免架起的轮子高速空转。L4 车检速度不走这里，
-  # 取 FSD controller.yaml 的 inspection_speed / inspection_throttle_max。
+  # 取 FSD controller.yaml 的 inspection_throttle（恒定开度，不走 PID）/ inspection_steer_*。
   target_speed_mps: 0.2
 
   # RES 发车放行（0x1E4 Byte1=0x13）：不按 GO，VCU 不执行 0x210 指令。
   # 测试直接等总线上的 0x1E4 发车帧（不经 FSD 转述）。
-  res_go_timeout_sec: 30.0  # 等人工按 RES 发车按钮的超时（s），超过即用例失败
+  res_go_timeout_sec: 60.0  # 等人工按 RES 发车按钮的超时（s），超过即用例失败（L3/L4 共用）
 
 test:
   frames:
     - id: 0x210          # 工控机→VCU 10Hz 保活（本机职责，周期可判定）
+    - id: 0x301          # 工控机→VCU 上线心跳（20Hz，DLC=1；本机职责，周期可判定）
     - id: 0x501          # VCU→工控机 模式帧（实测 10Hz 周期重发同一档位，不判周期）
     - id: 0x1E4          # RES→工控机 遥控器状态帧（实测 33.3Hz 周期电平广播）
-  period_tolerance_ratio: 0.2  # 周期容差（±20%），仅适用于 0x210 保活
+  period_tolerance_ratio: 0.2  # 周期容差（±20%），适用于 0x210 保活与 0x301 心跳
   ros_timeout_sec: 5.0         # ROS 话题等待/断言超时

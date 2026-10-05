@@ -27,6 +27,7 @@ import time
 import pytest
 
 from hil_test.bench_ui import wait_for_res_go
+from hil_test.protocol_loader import RES_START
 
 
 def _sim_interface():
@@ -49,6 +50,36 @@ def _sim_interface():
 
 
 _ON_SIM = _sim_interface()
+
+
+def _bench_target_speed(default=0.2):
+    """读取 hil_test.yaml 的 bench.target_speed_mps（与 RosInjector 代发直路同源）."""
+    try:
+        import yaml
+    except ImportError:
+        return default
+    cfg_dir = os.environ.get(
+        'HIL_CONFIG',
+        os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), 'config'))
+    try:
+        with open(os.path.join(cfg_dir, 'hil_test.yaml'), 'r', encoding='utf-8') as f:
+            return float(yaml.safe_load(f).get(
+                'bench', {}).get('target_speed_mps', default))
+    except (OSError, ValueError, TypeError):
+        return default
+
+
+def _go_seen_since(mon, proto, t0):
+    """自 t0（monotonic）起本机总线上是否出现过 0x1E4 Byte1=0x13（RES 发车）.
+
+    供门控断言用：若选档之后总线上确实来过 GO，那么进 EXPLORE 就是 GO 放行的合法
+    行为（操作员可能没等门控窗走完就按了按钮），不能判成「未按 GO 就启动」。
+    """
+    return any(
+        cid == proto.res['id'] and t >= t0 and proto.decode_1e4(data) == RES_START
+        for t, cid, data in mon.frames())
+
 
 pytestmark = [
     pytest.mark.motor,
@@ -142,24 +173,33 @@ def _enter_explore(fsd_ready, vcu, mon, proto):
     """
     # 已在 EXPLORE(3) 直接返回（状态机单向：EXPLORE 无回到 READY 的路径）
     if fsd_ready.wait_for('/system/mission_state', 3, timeout=1.0):
+        # 跳过 _enable_bench 时单独补一次开闸：can_interface 的 0x210 发送门控
+        # 要收到首份自检结论才开（仅 can_interface 单独重启过的场景才会缺闸）
+        fsd_ready.publish_devices_inspection(ok=True)
         return
     _enable_bench(fsd_ready)
     assert fsd_ready.wait_for('/system/mission_state', 1, timeout=10.0), \
         '未进入 READY（需 mission_manager 运行）'
+    t_mode = time.monotonic()  # 选档等待起点：门控判定只看这之后的 GO 帧
     if vcu is not None:
         vcu.set_mode(2)  # 仿真自动 AMI；真实接口人工在 AMI 上选直线加速
     assert _human_wait(mon, proto, 2, 30.0,
                        'AMI 选直线加速（2）；若已停在 2 档，先切走再切回',
                        inj=fsd_ready, state=1, state_mode=2), \
         '本机未在 0x501 上解析到 Byte1=2（直线加速），且状态未达 READY+ACCELERATION'
-    # 门控：选模式本身不得启动（RES GO 是必经放行）
-    assert not fsd_ready.wait_for('/system/mission_state', 3, timeout=2.0), \
-        '未按 RES GO 就进了 EXPLORE：检查 mission_manager 门控（选模式不得启动）'
-    # RES 发车：仿真自动按；真实台架提示人工按，判据为本机总线上的 0x1E4 发车帧
-    if vcu is not None:
-        vcu.press_start()
-    assert wait_for_res_go(mon, proto, '[L3]'), \
-        '未在本机总线上看到 RES 发车信号（0x1E4 Byte1=0x13）'
+    # 门控：选模式本身不得启动（RES GO 是必经放行）。窗口内若已进 EXPLORE，用总线
+    # 上的 GO 帧定性：有 GO → 操作员提前按（合法，直接继续，不再等一次新的 GO）；
+    # 无 GO → 说明门控失效，判失败。避免把「手快先按了 GO」误报成门控 bug。
+    started = fsd_ready.wait_for('/system/mission_state', 3, timeout=2.0)
+    if started:
+        assert _go_seen_since(mon, proto, t_mode), \
+            '未按 RES GO 就进了 EXPLORE：检查 mission_manager 门控（选模式不得启动）'
+    else:
+        # RES 发车：仿真自动按；真实台架提示人工按，判据为本机总线上的 0x1E4 发车帧
+        if vcu is not None:
+            vcu.press_start()
+        assert wait_for_res_go(mon, proto, '[L3]'), \
+            '未在本机总线上看到 RES 发车信号（0x1E4 Byte1=0x13）'
     assert fsd_ready.wait_for('/system/mission_state', 3, timeout=10.0), \
         '收到 RES GO 后未进 EXPLORE（检查 can_interface 的 /system/start_command ' \
         '与 mission_manager 的 start_requested_ 门控）'
@@ -173,18 +213,37 @@ def test_ami_acceleration_go(fsd_ready, vcu, bus_monitor, protocol):
 
 @pytest.mark.integration
 def test_low_speed_follow(fsd_ready, vcu, bus_monitor, protocol):
-    """低速驱动：EXPLORE 下代发直路（yaml 限速）、车速反馈静止 → 0x210 出现驱动开度.
+    """低速驱动：EXPLORE 下代发直路（yaml 限速）、车速反馈静止 → 0x210 给出驱动开度.
+
+    判据（全部取自本机 0x210 原始帧，不需要轮速反馈）：
+      方向  纵向必须 > 32767（32767 = 中位零输出、<32767 = 制动）——只判
+            「!= 32767」时，制动甚至全制动都会被当成“有驱动开度”；
+      量级  稳态开度 ≈ PID 期望：err = target - 0 = target，kp=1 → 定标
+            ≈ 32767 + target*32758（target = bench.target_speed_mps），容差 0.5~2×。
 
     车辆架起、目标车速 = bench.target_speed_mps（安全限速），故轮子会低速转动。
     """
     _enter_explore(fsd_ready, vcu, bus_monitor, protocol)
     fsd_ready.publish_waypoints_straight()  # 目标速度 = bench.target_speed_mps
+    target = _bench_target_speed()
     _drive_bench(fsd_ready, 0.0, 2.0)  # 车辆静止反馈 → 速度误差驱动输出
-    driven = False
+    exp = 32767 + int(target * 32758)
+    lo = 32767 + int(0.5 * target * 32758)
+    hi = 32767 + int(2.0 * target * 32758)
+    # 只取驱动回路跑开之后的稳态帧（_drive_bench 期间的起控瞬态不在窗口内）
+    peak = 32767
+    lowest = 32767
     deadline = time.time() + 3.0
     while time.time() < deadline:
-        if _bus_longitudinal(bus_monitor, protocol) != 32767:
-            driven = True
+        value = _bus_longitudinal(bus_monitor, protocol)
+        peak = max(peak, value)
+        lowest = min(lowest, value)
+        if peak > 32767:
             break
         time.sleep(0.05)
-    assert driven, '低速跟随期间 0x210 无驱动开度（controller 未参与或未闭环输出）'
+    assert peak > 32767, (
+        f'低速跟随期间 0x210 纵向未出现驱动开度（窗口内范围 {lowest}~{peak}，'
+        '均为中位/制动）：controller 未给出驱动（注意：制动方向同样不算驱动）')
+    assert lo <= peak <= hi, (
+        f'0x210 纵向开度 {peak} 偏离驱动期望区间 {lo}~{hi}'
+        f'（bench.target_speed_mps={target}，kp=1 → 定标 ≈ {exp}）')
