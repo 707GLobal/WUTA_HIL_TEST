@@ -53,18 +53,18 @@ def _inject_1e4(interface, protocol, state, count=1):
 
 @pytest.mark.unit
 def test_scale_center(protocol):
-    """定标中心点：纵向 0 → 32767；横向 0°（回正）→ 32762."""
+    """定标中心点：纵向 0 → 32767；横向 0°（回正）→ 32767."""
     data = protocol.encode_210(0.0, 0.0, False, False)
     assert data[:2] == ZERO_LE
-    assert data[2:4] == bytes([0xFA, 0x7F])   # 32762 小端
+    assert data[2:4] == ZERO_LE               # 32767 小端（纵向/横向中心同为 32767）
 
 
 @pytest.mark.unit
 def test_little_endian(protocol):
     """字节序：小端，Byte1=低字节."""
-    # 纵向满驱动 65525=0xFFF5 → [F5 FF]；横向满左（+25°）→ 0 = [00 00]
+    # 纵向满驱动 65535=0xFFFF → [FF FF]；横向满左（+25°）→ 0 = [00 00]
     data = protocol.encode_210(1.0, 25.0, False, False)
-    assert data[:2] == bytes([0xF5, 0xFF])
+    assert data[:2] == bytes([0xFF, 0xFF])
     assert data[2:4] == bytes([0x00, 0x00])
     # 横向满右（-25°）→ 65535 = [FF FF]
     data = protocol.encode_210(0.0, -25.0, False, False)
@@ -73,11 +73,11 @@ def test_little_endian(protocol):
 
 @pytest.mark.unit
 def test_clamp_out_of_range(protocol):
-    """越界钳位：纵向 [10, 65525]；横向 [0, 65535]."""
+    """越界钳位：纵向 [0, 65535]；横向 [0, 65535]."""
     data = protocol.encode_210(5.0, 0.0, False, False)
-    assert data[:2] == bytes([0xF5, 0xFF])
+    assert data[:2] == bytes([0xFF, 0xFF])
     data = protocol.encode_210(-5.0, 0.0, False, False)
-    assert data[:2] == bytes([0x0A, 0x00])
+    assert data[:2] == bytes([0x00, 0x00])
     assert protocol.decode_210(protocol.encode_210(0.0, 90.0, False, False))['lateral'] == 0
     assert protocol.decode_210(protocol.encode_210(0.0, -90.0, False, False))['lateral'] == 65535
 
@@ -94,18 +94,18 @@ def test_mid_scale(protocol):
 
 @pytest.mark.unit
 def test_lateral_scaling(protocol):
-    """Signal2 新规格：0~65535、32762 为中心；0=满左、65535=满右."""
+    """Signal2 正式协议：0~65535、32767 为中心；0=满左、65535=满右."""
     from hil_test.protocol_loader import scale_lateral
     m = protocol.max_steer_deg
-    assert scale_lateral(0.0, m) == 32762      # 回正
+    assert scale_lateral(0.0, m) == 32767      # 回正
     assert scale_lateral(+m, m) == 0           # 满左
     assert scale_lateral(-m, m) == 65535       # 满右
-    # 车检幅值 15°：左半段跨度 32762、右半段 32773
-    assert scale_lateral(+15.0, m) == 13104
-    assert scale_lateral(-15.0, m) == 52425
+    # 15°（= 0.6 满量程）：左半段跨度 32767、右半段 32768
+    assert scale_lateral(+15.0, m) == 13106
+    assert scale_lateral(-15.0, m) == 52427
     # protocol.yaml 的横向定义必须与实现一致（防漂移）
     lat = protocol.tx['signals']['lateral']
-    assert (lat['center'], lat['min'], lat['max']) == (32762, 0, 65535)
+    assert (lat['center'], lat['min'], lat['max']) == (32767, 0, 65535)
 
 
 @pytest.mark.unit

@@ -1,10 +1,11 @@
 """解析 protocol.yaml，编解码统一入口（0x210 / 0x301 / 0x501 / 0x1E4）.
 
-定标规则与 can_interface.cpp scaleControl() 保持一致：
-  控制量 x∈[-1,1] → 10~65525，32767 为中心（0 控制）
-  驱动/右：32767 + x*32758；制动/左：32767 + x*32757；钳位 [10, 65525]
+定标规则与 can_interface.cpp scaleLongitudinal() 保持一致（26 赛季正式协议）：
+  控制量 x∈[-1,1] → 0~65535，32767 为中心（0 控制）
+  驱动：32767 + x*32768；制动：32767 + x*32767；钳位 [0, 65535]
+  （两侧跨度不同：制动半段 32767、驱动半段 32768）
 
-Signal2 横向（scale_lateral，新规格）：0~65535，32762 为中心，
+Signal2 横向（scale_lateral，26 赛季正式协议）：0~65535，32767 为中心，
   越靠近 0 越左（0 = 满左）、越大越右（65535 = 满右）。
 
 0x1E4（RES 遥控器 → 工控机）：33.3Hz 周期电平广播，Byte1 = 遥控器状态，
@@ -25,14 +26,15 @@ RES_START = 0x13
 
 def scale_control(x):
     """Signal1 纵向：归一化控制量 → 16bit 定标值（镜像 C++ scaleLongitudinal，含钳位）."""
-    value = 32767.0 + x * 32758.0 if x >= 0.0 else 32767.0 + x * 32757.0
-    return int(min(65525.0, max(10.0, value)))
+    span = 32768.0 if x >= 0.0 else 32767.0
+    value = 32767.0 + x * span
+    return int(min(65535.0, max(0.0, value)))
 
 
-# Signal2 横向（新规格）：0~65535，32762 为中心（回正）
-#   0~32762    越靠近 0 越左 → 0 = 满左；32762~65535 越大越右 → 65535 = 满右
-#   左半段跨度 = center-min = 32762；右半段 = max-center = 32773（镜像 C++ scaleLateral）
-LATERAL_CENTER = 32762.0
+# Signal2 横向（26 赛季正式协议）：0~65535，32767 为中心（回正）
+#   0~32767    越靠近 0 越左 → 0 = 满左；32767~65535 越大越右 → 65535 = 满右
+#   左半段跨度 = center-min = 32767；右半段 = max-center = 32768（镜像 C++ scaleLateral）
+LATERAL_CENTER = 32767.0
 LATERAL_MIN = 0.0
 LATERAL_MAX = 65535.0
 
@@ -40,7 +42,7 @@ LATERAL_MAX = 65535.0
 def scale_lateral(steer_deg, max_steer_deg):
     """Signal2 横向：转向角（+ = 左，autoware 约定）→ 原始值.
 
-    满量程 ±max_steer_deg 对应 0（满左）/ 65535（满右），中心 32762 = 回正。
+    满量程 ±max_steer_deg 对应 0（满左）/ 65535（满右），中心 32767 = 回正。
     """
     x = (steer_deg / max_steer_deg) if max_steer_deg > 0.0 else 0.0
     span = (LATERAL_CENTER - LATERAL_MIN) if x >= 0.0 else (LATERAL_MAX - LATERAL_CENTER)

@@ -219,7 +219,7 @@ def test_low_speed_follow(fsd_ready, vcu, bus_monitor, protocol):
       方向  纵向必须 > 32767（32767 = 中位零输出、<32767 = 制动）——只判
             「!= 32767」时，制动甚至全制动都会被当成“有驱动开度”；
       量级  稳态开度 ≈ PID 期望：err = target - 0 = target，kp=1 → 定标
-            ≈ 32767 + target*32758（target = bench.target_speed_mps），容差 0.5~2×。
+            ≈ 32767 + target*32768（target = bench.target_speed_mps），容差 0.5~2×。
 
     车辆架起、目标车速 = bench.target_speed_mps（安全限速），故轮子会低速转动。
     """
@@ -227,9 +227,9 @@ def test_low_speed_follow(fsd_ready, vcu, bus_monitor, protocol):
     fsd_ready.publish_waypoints_straight()  # 目标速度 = bench.target_speed_mps
     target = _bench_target_speed()
     _drive_bench(fsd_ready, 0.0, 2.0)  # 车辆静止反馈 → 速度误差驱动输出
-    exp = 32767 + int(target * 32758)
-    lo = 32767 + int(0.5 * target * 32758)
-    hi = 32767 + int(2.0 * target * 32758)
+    exp = 32767 + int(target * 32768)
+    lo = 32767 + int(0.5 * target * 32768)
+    hi = 32767 + int(2.0 * target * 32768)
     # 只取驱动回路跑开之后的稳态帧（_drive_bench 期间的起控瞬态不在窗口内）
     peak = 32767
     lowest = 32767

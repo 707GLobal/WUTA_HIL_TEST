@@ -1,5 +1,6 @@
 # 26赛季 VCU-工控机 CAN 协议
-# 镜像自: WUTA-FSD/ros2_ws/src/system/can_interface/docs_for_can/26赛季 VCU - 工控机 CAN通信协议规划.md
+# 镜像自: WUTA-FSD/ros2_ws/src/system/can_interface/docs_for_can/26赛季 VCU - 工控机 CAN通信协议.md
+# （正式版；旧「…通信协议规划.md」的 10~65525 量程已作废）
 # hil_test 编解码与断言统一入口；协议变更只改本文件
 
 # 工控机 → VCU（发送）
@@ -13,14 +14,14 @@ tx_210:
       bytes: [0, 1]
       little_endian: true
       center: 32767
-      min: 10
-      max: 65525
-    lateral:              # Signal2 横向控制（0=满左、65535=满右，中心 32762）Byte3-4
+      min: 0                # 正式协议 0~65535（旧「规划」版为 10~65525）
+      max: 65535            # 制动半段跨度 32767（32767→0）、驱动半段 32768（32767→65535）
+    lateral:              # Signal2 横向控制（0=满左、65535=满右，中心 32767）Byte3-4
       bytes: [2, 3]
       little_endian: true
-      center: 32762
-      min: 0
-      max: 65535
+      center: 32767
+      min: 0                # 左半段跨度 32767（32767→0）
+      max: 65535            # 右半段跨度 32768（32767→65535）
     online:               # Signal3 工控机上线 Byte5
       byte: 4
     finished:             # Signal4 任务已完成 Byte6

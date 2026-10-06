@@ -211,13 +211,13 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
       入口  选模式 ≠ 启动：未按 GO 时 2s 内不得进 INSPECTION(2)；收到 0x1E4
             Byte1=0x13（RES 发车）后才进 INSPECTION(2)。窗口内若已出现 GO 帧，
             说明是操作员提前按下（合法），不判成门控失效
-      动作  幅值 ≈ inspection_steer_amp/max_steer_deg×跨度（左半 32762 / 右半 32773，
-            5.7692°/25° → 7563，±10%；即方向盘 ±30°）
+      动作  幅值 ≈ inspection_steer_amp/max_steer_deg×跨度（左半 32767 / 右半 32768，
+            5.7692°/25° → 7562，±10%；即方向盘 ±30°）
             周期 = inspection_steer_period（9.0s，±10%，按上升沿过零间隔取中位）
-            回中帧（横向恰为 32762，Signal2 新规格中心）占比 < 2%：真过零时相邻帧
+            回中帧（横向恰为 32767，Signal2 正式协议中心）占比 < 2%：真过零时相邻帧
             也贴近中位，不会孤立出现；历史上「未使能」零指令插队会让 13% 的帧被拉回中位
             纵向必须**持续在驱动**（>32767）且恒为 inspection_throttle 的定标值
-            （0.16 → 38008，±2 raw）：车检不走 PID，直接发常量。只判「不制动/
+            （0.16 → 38009，±2 raw）：车检不走 PID，直接发常量。只判「不制动/
             不超上限」时，全程 32767（一点驱动都没有）会从两条边界中间漏过去
       完成  25~30s 内进 FINISH(6)，且 0x210 Byte6 finished=1、纵向/横向回零；
             回中不得有跳变：横向单帧变化 ≤ 幅值的 25%（当前 5.77° → 1.44°）
@@ -237,11 +237,11 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
     ctrl = _ctrl_params()
     steer_amp = float(ctrl.get('inspection_steer_amp', 5.7692))
     throttle_const = float(ctrl.get('inspection_throttle', 0.16))
-    # 横向定标（Signal2 新规格：0~65535、32762 为中心 = 回正；见 C++ scaleLateral）
+    # 横向定标（Signal2 正式协议：0~65535、32767 为中心 = 回正；见 C++ scaleLateral）
     lat_cfg = protocol.tx['signals']['lateral']
-    lat_c = int(lat_cfg['center'])              # 32762
-    lat_span_l = lat_c - int(lat_cfg['min'])    # 32762（左半段）
-    lat_span_r = int(lat_cfg['max']) - lat_c    # 32773（右半段）
+    lat_c = int(lat_cfg['center'])              # 32767
+    lat_span_l = lat_c - int(lat_cfg['min'])    # 32767（左半段）
+    lat_span_r = int(lat_cfg['max']) - lat_c    # 32768（右半段）
     amp_exp = steer_amp / protocol.max_steer_deg * max(lat_span_l, lat_span_r)
     # 转向周期：优先 inspection_steer_period；旧配置只有 freq 时用其倒数
     period_exp = float(ctrl.get('inspection_steer_period', 0.0) or 0.0)
@@ -249,7 +249,7 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
         steer_freq = float(ctrl.get('inspection_steer_freq', 0.0) or 0.0)
         period_exp = (1.0 / steer_freq) if steer_freq > 0 else 6.0
     # 纵向定标：恒定开度直接下发 → 总线值应精确等于 throttle_const 的定标值
-    lon_exp = 32767 + int(throttle_const * 32758)
+    lon_exp = 32767 + int(throttle_const * 32768)
     lon_lo = lon_exp - 2   # 仅留 C++ 截断 vs Python int 的取整余量
     lon_hi = lon_exp + 2
 
@@ -352,7 +352,7 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
         lat_all = [protocol.decode_210(data)['lateral']
                    for _, cid, data in bus_monitor.frames()
                    if cid == protocol.tx['id']]
-        # raw → deg：用较小的跨度（左半 32762）作保守换算，角度估计只会偏大
+        # raw → deg：用较小的跨度（左半 32767）作保守换算，角度估计只会偏大
         step_deg_per_raw = protocol.max_steer_deg / float(min(lat_span_l, lat_span_r))
         max_step = max((abs(b - a) * step_deg_per_raw
                         for a, b in zip(lat_all, lat_all[1:])), default=0.0)
