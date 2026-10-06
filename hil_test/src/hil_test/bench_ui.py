@@ -10,6 +10,10 @@ RES 通过 CAN 0x1E4 广播（实测 33.3Hz 电平广播，Byte1=0x13 为发车�
   wait_for_res_go()  —— 等本机总线上**新到**一帧 0x13（人按没按 GO 的唯一客观证据）
 
 超时取自 hil_test.yaml 的 bench 段（res_go_timeout_sec）。
+
+L4 车检到 FINISH 后不立即下 FSD：hold_after_finish() 保持整条链路在线
+（默认 30s，可取 bench.post_finish_hold_sec / HIL_POST_FINISH_HOLD_SEC 覆盖），
+给现场留出观察/确认窗口，之后用例 teardown 停 mission_manager、脚本停其余节点。
 """
 
 import os
@@ -23,6 +27,7 @@ _CONFIG_DIR = os.environ.get(
         os.path.abspath(__file__)))), 'config'))
 
 _DEFAULT_TIMEOUT_SEC = 60.0
+_DEFAULT_POST_FINISH_HOLD_SEC = 30.0
 
 
 def _bench_cfg(key, default):
@@ -37,6 +42,46 @@ def _bench_cfg(key, default):
 def res_go_timeout_sec():
     """人工按 RES 发车按钮的等待超时（s）."""
     return _bench_cfg('res_go_timeout_sec', _DEFAULT_TIMEOUT_SEC)
+
+
+def post_finish_hold_sec():
+    """L4 车检到 FINISH 后、下 FSD 之前的保持时长（s）.
+
+    优先级：环境变量 HIL_POST_FINISH_HOLD_SEC（现场临时调整，不改配置）>
+    hil_test.yaml 的 bench.post_finish_hold_sec > 默认 30s；<=0 表示不等待。
+    """
+    env = os.environ.get('HIL_POST_FINISH_HOLD_SEC')
+    if env not in (None, ''):
+        try:
+            return float(env)
+        except ValueError:
+            print(f'[L4]   !! HIL_POST_FINISH_HOLD_SEC={env!r} 不是数字，改用配置值',
+                  flush=True)
+    return _bench_cfg('post_finish_hold_sec', _DEFAULT_POST_FINISH_HOLD_SEC)
+
+
+def hold_after_finish(prefix, seconds=None):
+    """车检完成后保持 FSD 在线：等 seconds 秒，再让调用方下 FSD.
+
+    目的：FINISH 后不立刻收尾——用例返回即 teardown 停 mission_manager、脚本随即
+    停 can_interface/controller——给现场留出观察/确认窗口。等待中每 5s 打印一行
+    剩余时间（pytest 的 tee-sys 让提示实时可见）。
+    """
+    if seconds is None:
+        seconds = post_finish_hold_sec()
+    if seconds <= 0:
+        print(f'{prefix}   跳过车检后保持（{seconds:.0f}s）：直接下 FSD', flush=True)
+        return
+    print(f'\n{prefix} 车检已完成：保持 FSD 在线 {seconds:.0f}s 后再下 FSD', flush=True)
+    t0 = time.monotonic()
+    deadline = t0 + seconds
+    while True:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            break
+        print(f'{prefix}   …保持中，剩 {remain:.0f}s', flush=True)
+        time.sleep(min(5.0, remain))
+    print(f'{prefix}   保持结束（{time.monotonic() - t0:.0f}s），可以下 FSD', flush=True)
 
 
 def wait_for_res_go(mon, proto, prefix, timeout=None, hint=None):

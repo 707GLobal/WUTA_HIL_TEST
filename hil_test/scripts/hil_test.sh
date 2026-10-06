@@ -203,6 +203,18 @@ cleanup() {
     return
   fi
   stop_nodes
+  kill_stale_nodes
+}
+
+# ---- 清理残留 FSD 节点 ----
+# 上次运行被 Ctrl-C / 硬中断时：脚本起的节点由 trap 收尾，但 **mission_manager 是
+# 用例自起的**（不在 NODE_PIDS 里，脚本管不到）会残留。残留实例的后果（2026-10-06
+# 20:21~20:24 实测连续 4 次 L4 失败）：ROS 图里一直有 mission_manager → 下一次运行的
+# fixture「等节点出现」立刻通过（早于新实例建好订阅）→ 就绪信号被丢弃、新实例停在
+# IDLE；残留实例还继续 10Hz 广播旧状态（EMERGENCY=7），永远等不到 READY。故启动前与
+# 退出时都清一次。判定按 /proc/<pid>/cmdline 的可执行体精确匹配（见 scripts/kill_stale_nodes.py）。
+kill_stale_nodes() {
+  python3 "$HIL_ROOT/scripts/kill_stale_nodes.py" || true
 }
 trap cleanup EXIT
 
@@ -278,8 +290,9 @@ run_level() {
     python3 "$HIL_ROOT/scripts/run_hil.py" --level L1 --phase pre \
       --interface "$INTERFACE" || rc=$?
   fi
-  # L1 post / 其余层：起该层所需 FSD 节点后跑
+  # L1 post / 其余层：先清残留节点（上次中断可能留下用例自起的 mission_manager），再起本层节点
   if [ "$rc" -eq 0 ]; then
+    kill_stale_nodes
     start_level_nodes "$level"
     if [ "$level" = "L1" ]; then
       python3 "$HIL_ROOT/scripts/run_hil.py" --level L1 --phase post \

@@ -6,7 +6,10 @@
 完成链（回零 + mission_complete → FINISH + 0x210 Byte6 finished=1）。
 
 单一用例 test_inspection_full 一次连续跑完：入口门控 → 运动波形 → 完成链三组
-判据都在同一段演示里检查，中途不插人工操作、也不分段重启实例。
+判据都在同一段演示里检查，中途不插人工操作、也不分段重启实例。到 FINISH 后
+**不立刻收尾**：保持 FSD 在线（默认 30s，bench.post_finish_hold_sec /
+HIL_POST_FINISH_HOLD_SEC 可调）再断言并 teardown 下 FSD。未到 FINISH（任务没完成）
+则按原样立即收尾，不空等。
 
 流程：READY(1) → AMI 选 mode 6 → 【本机解析 0x501 Byte1=6】→ **未按 GO 不得启动**
 → 【本机解析 0x1E4 Byte1=0x13 发车按钮】→ INSPECTION(2) → …27s… → FINISH(6)。
@@ -36,7 +39,7 @@ import time
 
 import pytest
 
-from hil_test.bench_ui import wait_for_res_go
+from hil_test.bench_ui import hold_after_finish, wait_for_res_go
 from hil_test.protocol_loader import RES_START
 
 
@@ -143,13 +146,27 @@ def _human_wait(mon, proto, expect_mode, timeout, hint, inj=None,
     return False
 
 
-def _enable_bench(inj):
-    """台架就绪：上线 + 门控就绪信号."""
-    inj.publish_devices_inspection(ok=True)  # Signal3 上线
-    inj.publish_lidar_ready()
-    inj.publish_localization_ready()
-    inj.publish_pose()
-    time.sleep(0.5)
+def _enable_bench(inj, timeout=15.0):
+    """台架就绪：**反复**发上线 + 门控就绪信号，直到 READY(1)；返回是否到达.
+
+    不能只发一次：`/system/lidar_ready`、`/system/localization_ready` 都是 volatile
+    （非 latched），而 mission_manager 是本用例自起的实例（或脚本刚起的实例）——若注入
+    赶在它订阅匹配之前，消息会被**静默丢弃**，状态机永远停在 IDLE。台架实测 2026-10-06
+    20:21~20:24 连续 4 次失败就是这个窗口（注入早于节点初始化 0.16s）。重复发同一电平值
+    对「订阅早已就绪」的正常情况无副作用。
+    """
+    deadline = time.time() + timeout
+    while True:
+        inj.publish_devices_inspection(ok=True)  # Signal3 上线
+        inj.publish_lidar_ready()
+        inj.publish_localization_ready()
+        inj.publish_pose()
+        inj.spin_once()
+        if inj.latest('/system/mission_state') == 1:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
 
 
 @pytest.fixture
@@ -163,9 +180,8 @@ def mm(mm_factory):
 
 def _enter_inspection(inj, vcu, mon, proto):
     """从 IDLE 进入 INSPECTION(2)：台架就绪 → AMI 选 mode 6 → 门控 → RES GO."""
-    _enable_bench(inj)
-    assert inj.wait_for('/system/mission_state', 1, timeout=10.0), \
-        '未进入 READY（需 mission_manager 运行）'
+    assert _enable_bench(inj), \
+        '未进入 READY（需 mission_manager 运行；就绪信号已按 0.2s 重发 15s）'
     t_mode = time.monotonic()  # 选档等待起点：门控判定只看这之后的 GO 帧
     if vcu is not None:
         vcu.set_mode(6)  # 仿真自动 AMI；真实接口人工在 AMI 上选车检
@@ -221,6 +237,9 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
             不超上限」时，全程 32767（一点驱动都没有）会从两条边界中间漏过去
       完成  25~30s 内进 FINISH(6)，且 0x210 Byte6 finished=1、纵向/横向回零；
             回中不得有跳变：横向单帧变化 ≤ 幅值的 25%（当前 5.77° → 1.44°）
+      保持  FINISH 后保持 FSD 在线 30s（bench.post_finish_hold_sec；环境变量
+            HIL_POST_FINISH_HOLD_SEC 可临时覆盖，0=不保持）再收尾下 FSD：现场
+            有 30s 窗口确认车已停稳/无残余动作，避免一完成就停节点
 
     期望值（转向幅值/周期/纵向恒定开度）从 controller.yaml 推导（HIL_CTRL_PARAMS），
     现场调 inspection_* 不需要同步改测试。
@@ -279,7 +298,14 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
                     break
             time.sleep(0.05)
 
-    # ⑤ 波形：只取采样窗内的帧（③④ 的收尾帧含回零，会污染统计）
+    # ⑤ 完成链证据后：保持 FSD 在线（默认 30s）再收尾下 FSD，不立刻退出。
+    #    未跑到 FINISH 说明任务没完成，不做保持（要留现场用 hil_test.sh -k）。
+    if finished_at is not None:
+        hold_after_finish('[L4]')
+    else:
+        print('[L4]   未到 FINISH：跳过车检后保持，直接收尾', flush=True)
+
+    # ⑥ 波形：只取采样窗内的帧（③④⑤ 之后的收尾/保持帧含回零，会污染统计）
     frames = [(t - t0, protocol.decode_210(data))
               for t, cid, data in bus_monitor.frames()
               if cid == protocol.tx['id']
@@ -345,7 +371,7 @@ def test_inspection_full(fsd_ready, mm, vcu, bus_monitor, protocol):
         if not fin_frame:
             bad.append('完成后 0x210 未置 finished=1 或纵向/横向未回零')
 
-        # ⑥ 收尾回中不得有跳变：duration 与转向周期成 0.5 的整数倍时末帧本就近中位；若演示
+        # ⑦ 收尾回中不得有跳变：duration 与转向周期成 0.5 的整数倍时末帧本就近中位；若演示
         #    停在幅值附近，finishInspection() 直接发 angle=0 会形成单帧大跳变（实测
         #    27.0s/0.4Hz → -14.3°@20ms ≈ 715°/s，是 180°/s 限幅的 4 倍）。这里对全段
         #    0x210 相邻帧的横向变化量设上限；正弦本身仅 0.12°/帧，真跳变 ≥14° 必触发。

@@ -193,6 +193,23 @@ def fsd_ready(ros):
     pytest.skip('can_interface 未运行（先启动 FSD），集成用例跳过')
 
 
+def _kill_stale_mission_manager(wait_sec=5.0):
+    """清掉残留的 mission_manager 实例，返回被杀掉的 PID 列表.
+
+    残留来源：上一次运行被 Ctrl-C / 硬中断时，**用例自起**的实例可能没被 fixture teardown
+    收走（它也不在脚本的 NODE_PIDS 里，脚本 trap 管不到）。残留实例的危害：
+      ① ROS 图里一直有 'mission_manager' → 本 fixture 的「等节点出现」立刻通过（早于
+         新实例建好订阅），用例一次性注入的就绪信号被丢弃、新实例永远停在 IDLE；
+      ② 残留实例还在 10Hz 广播它的旧状态（实测残留实例停在 EMERGENCY=7），
+         /system/mission_state 上 0/7 交替，永远等不到 READY=1。
+    台架实测（2026-10-06 20:21~20:24 连续 4 次失败）就是 20:18 那次运行留下的实例所致。
+    判定规则（只认可执行体，不用 pgrep -f 关键字）见 hil_test/stale_nodes.py。
+    """
+    from hil_test.stale_nodes import kill_stale
+    return [pid for pid, _pkg, _node in
+            kill_stale((('mission_manager', 'mission_manager_node'),), wait_sec)]
+
+
 @pytest.fixture
 def mm_factory(fsd_ready, tmp_path):
     """按用例启动/停止独立 mission_manager 实例，返回 callable(*extra_params).
@@ -206,6 +223,18 @@ def mm_factory(fsd_ready, tmp_path):
     procs = []
 
     def _start(*extra_params):
+        # 先清残留实例：否则下面的「等节点出现」会被上一次的残留实例骗过，
+        # 且它会继续广播旧状态（详见 _kill_stale_mission_manager 说明）
+        stale = _kill_stale_mission_manager()
+        if stale:
+            print(f'[hil_test] 警告: 发现残留 mission_manager {stale}，已清理'
+                  f'（上一次运行未收尾；下一次请让它跑完或先手动 pkill）', flush=True)
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                fsd_ready.spin_once()
+                if 'mission_manager' not in fsd_ready.graph_nodes():
+                    break
+                time.sleep(0.1)
         cmd = ['ros2', 'run', 'mission_manager', 'mission_manager_node',
                '--ros-args', '--params-file', params]
         for p in extra_params:
@@ -215,16 +244,33 @@ def mm_factory(fsd_ready, tmp_path):
             proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                     start_new_session=True)
         procs.append(proc)
-        # 等待节点出现在 ROS 图中（DDS 发现可能滞后）
+        t_start = time.time()   # 只认本次启动之后收到的状态广播
+        # ① 等节点出现在 ROS 图中（DDS 发现可能滞后）
         deadline = time.time() + 15.0
         while time.time() < deadline:
             fsd_ready.spin_once()
             if 'mission_manager' in fsd_ready.graph_nodes():
-                return proc
+                break
             if proc.poll() is not None:
                 pytest.skip(f'mission_manager 启动失败，日志: {log_path}')
             time.sleep(0.2)
-        pytest.skip('mission_manager 节点未就绪')
+        else:
+            pytest.skip('mission_manager 节点未就绪')
+        # ② 「出现在 ROS 图上」≠「初始化完成」：节点一创建就会被 DDS 发现，而它的订阅
+        #    （/system/lidar_ready、/system/localization_ready 等 volatile 话题）要等构造
+        #    函数跑完才匹配上。用例若在这段窗口里一次性注入就绪信号，消息会被静默丢弃，
+        #    状态机永远停在 IDLE——台架实测（2026-10-06 20:21~20:24）：注入早于
+        #    "Mission Manager initialized" 0.16s 时 4/4 全失败，晚 0.03~0.10s 时全通过。
+        #    故再等它广播本实例的 10Hz /system/mission_state（构造完成、定时器已起）。
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            fsd_ready.spin_once()
+            if fsd_ready.latest_since('/system/mission_state', t_start) is not None:
+                return proc
+            if proc.poll() is not None:
+                pytest.skip(f'mission_manager 启动失败，日志: {log_path}')
+            time.sleep(0.1)
+        pytest.skip('mission_manager 未开始广播 /system/mission_state（初始化未完成？）')
 
     yield _start
 

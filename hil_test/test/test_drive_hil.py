@@ -135,14 +135,27 @@ def _human_wait(mon, proto, expect_mode, timeout, hint, inj=None,
     return False
 
 
-def _enable_bench(inj):
-    """台架就绪：上线 + 门控就绪信号 + 直路（目标车速取 yaml bench 限速）."""
-    inj.publish_devices_inspection(ok=True)  # Signal3 上线
-    inj.publish_lidar_ready()
-    inj.publish_localization_ready()
-    inj.publish_pose()
-    inj.publish_waypoints_straight()
-    time.sleep(0.5)
+def _enable_bench(inj, timeout=15.0):
+    """台架就绪：**反复**发上线 + 门控就绪信号 + 直路，直到 READY(1)；返回是否到达.
+
+    不能只发一次：`/system/lidar_ready`、`/system/localization_ready` 都是 volatile
+    （非 latched），若注入赶在 mission_manager 订阅匹配之前会被**静默丢弃**，状态机
+    永远停在 IDLE（L4 台架实测出现过早 0.16s 的窗口，连续 4 次失败）。重复发同一电平值
+    对「订阅早已就绪」的正常情况无副作用。
+    """
+    deadline = time.time() + timeout
+    while True:
+        inj.publish_devices_inspection(ok=True)  # Signal3 上线
+        inj.publish_lidar_ready()
+        inj.publish_localization_ready()
+        inj.publish_pose()
+        inj.publish_waypoints_straight()
+        inj.spin_once()
+        if inj.latest('/system/mission_state') == 1:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
 
 
 def _drive_bench(inj, vx, duration):
@@ -177,9 +190,8 @@ def _enter_explore(fsd_ready, vcu, mon, proto):
         # 要收到首份自检结论才开（仅 can_interface 单独重启过的场景才会缺闸）
         fsd_ready.publish_devices_inspection(ok=True)
         return
-    _enable_bench(fsd_ready)
-    assert fsd_ready.wait_for('/system/mission_state', 1, timeout=10.0), \
-        '未进入 READY（需 mission_manager 运行）'
+    assert _enable_bench(fsd_ready), \
+        '未进入 READY（需 mission_manager 运行；就绪信号已按 0.2s 重发 15s）'
     t_mode = time.monotonic()  # 选档等待起点：门控判定只看这之后的 GO 帧
     if vcu is not None:
         vcu.set_mode(2)  # 仿真自动 AMI；真实接口人工在 AMI 上选直线加速

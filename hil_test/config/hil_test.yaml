@@ -14,7 +14,13 @@ bench:
 
   # RES 发车放行（0x1E4 Byte1=0x13）：不按 GO，VCU 不执行 0x210 指令。
   # 测试直接等总线上的 0x1E4 发车帧（不经 FSD 转述）。
-  res_go_timeout_sec: 60.0  # 等人工按 RES 发车按钮的超时（s），超过即用例失败（L3/L4 共用）
+  res_go_timeout_sec: 600.0  # 等人工按 RES 发车按钮的超时（s），超过即用例失败（L3/L4 共用）
+
+  # L4 车检到 FINISH 后、脚本下 FSD（用例 teardown 停 mission_manager → 脚本停
+  # can_interface/controller）之前，保持整条链路在线的时间（s）。给现场留观察/确认
+  # 窗口，避免车检一完成节点就没了；0=不保持（立即收尾）。仅 L4 生效。
+  # 现场临时改：HIL_POST_FINISH_HOLD_SEC=10 ./scripts/hil_test.sh -l L4 -i can0 -n
+  post_finish_hold_sec: 30.0
 
 test:
   frames:

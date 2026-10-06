@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-ZERO_LE = bytes([0xFF, 0x7F])  # 32767 小端
+ZERO_BE = bytes([0x7F, 0xFF])  # 32767 大端（0x7FFF，高位在前）
 
 
 def _require_sim_interface(interface, is_sim):
@@ -55,13 +55,25 @@ def _inject_1e4(interface, protocol, state, count=1):
 def test_scale_center(protocol):
     """定标中心点：纵向 0 → 32767；横向 0°（回正）→ 32767."""
     data = protocol.encode_210(0.0, 0.0, False, False)
-    assert data[:2] == ZERO_LE
-    assert data[2:4] == ZERO_LE               # 32767 小端（纵向/横向中心同为 32767）
+    assert data[:2] == ZERO_BE
+    assert data[2:4] == ZERO_BE               # 32767 大端（纵向/横向中心同为 32767）
 
 
 @pytest.mark.unit
-def test_little_endian(protocol):
-    """字节序：小端，Byte1=低字节."""
+def test_big_endian(protocol):
+    """字节序：**大端**，Byte1=高字节.
+
+    用「高低字节不同」的值判定，别用 0xFFFF/0x0000/0x7FFF 这类回文值
+    （它们在两种字节序下字节相同，判不出端序）。
+    """
+    # 纵向 +0.5 → 32767+0.5*32768 = 49151 = 0xBFFF → 大端 [BF FF]（小端是 [FF BF]）
+    data = protocol.encode_210(0.5, 0.0, False, False)
+    assert data[:2] == bytes([0xBF, 0xFF]), f'纵向字节序不是大端: {data[:2].hex(" ")}'
+    # 横向 -12.5°（= 0.5 满量程向右）→ 49151 = 0xBFFF → [BF FF]
+    data = protocol.encode_210(0.0, -12.5, False, False)
+    assert data[2:4] == bytes([0xBF, 0xFF]), f'横向字节序不是大端: {data[2:4].hex(" ")}'
+    # 与配置一致：protocol.yaml 的 little_endian 开关必须为 false
+    assert protocol.signal_little_endian is False
     # 纵向满驱动 65535=0xFFFF → [FF FF]；横向满左（+25°）→ 0 = [00 00]
     data = protocol.encode_210(1.0, 25.0, False, False)
     assert data[:2] == bytes([0xFF, 0xFF])

@@ -8,6 +8,10 @@
 Signal2 横向（scale_lateral，26 赛季正式协议）：0~65535，32767 为中心，
   越靠近 0 越左（0 = 满左）、越大越右（65535 = 满右）。
 
+0x210 Signal1/Signal2 字节序：**大端（Motorola，高字节在前）**，取自 protocol.yaml 的
+  tx_210.signals.*.little_endian（当前 false）；与 can_interface.cpp 的
+  packControlFrame() 保持一致，L1 post 的 0x210 透传用例会交叉核对总线真实字节。
+
 0x1E4（RES 遥控器 → 工控机）：33.3Hz 周期电平广播，Byte1 = 遥控器状态，
   0x11 上线 / 0x13 发车按钮（瞬时脉冲）/ 0x10 急停（持续电平）。
 0x301（工控机 → VCU）：上线心跳，标准帧 / DLC=1 / 20Hz，
@@ -64,6 +68,14 @@ class Protocol:
             'id': 0x301, 'dlc': 1, 'period_ms': 50,
             'online_byte': 0, 'online_value': 0x01, 'offline_value': 0x00})
         self.max_steer_deg = float(self.tx['max_steer_deg'])
+        # Signal1/Signal2 字节序：以 protocol.yaml 的 signals.*.little_endian 为准
+        # （当前 = 大端，与 can_interface.cpp packControlFrame() 一致）。
+        # L1 post 的 0x210 透传用例拿总线真实字节与本配置对照，两边不一致即失败。
+        flags = {bool(self.tx['signals'][name].get('little_endian', True))
+                 for name in ('longitudinal', 'lateral')}
+        if len(flags) != 1:
+            raise ValueError('protocol.yaml: longitudinal/lateral 的 little_endian 必须一致')
+        self.signal_little_endian = flags.pop()
 
     # ---- 编码 0x210（工控机→VCU）----
     def encode_210(self, throttle_brake, angle_deg, online, finished):
@@ -71,8 +83,8 @@ class Protocol:
         s1 = scale_control(float(throttle_brake))
         s2 = scale_lateral(float(angle_deg), self.max_steer_deg)  # angle 正=左 → 小值
         data = bytearray(8)
-        self._put_u16(data, 0, s1)
-        self._put_u16(data, 2, s2)
+        self._put_u16(data, 0, s1, self.signal_little_endian)
+        self._put_u16(data, 2, s2, self.signal_little_endian)
         data[4] = 1 if online else 0
         data[5] = 1 if finished else 0
         return bytes(data)
@@ -80,8 +92,8 @@ class Protocol:
     def decode_210(self, data):
         """解析 0x210 帧，供总线断言."""
         return {
-            'longitudinal': self._get_u16(data, 0),
-            'lateral': self._get_u16(data, 2),
+            'longitudinal': self._get_u16(data, 0, self.signal_little_endian),
+            'lateral': self._get_u16(data, 2, self.signal_little_endian),
             'online': bool(data[4]),
             'finished': bool(data[5]),
         }
@@ -119,12 +131,13 @@ class Protocol:
         return self.res['state_map'].get(value)
 
     @staticmethod
-    def _put_u16(data, offset, value):
-        """小端写入 16bit."""
-        data[offset] = value & 0xFF
-        data[offset + 1] = (value >> 8) & 0xFF
+    def _put_u16(data, offset, value, little=True):
+        """写入 16bit（little=True 小端 / False 大端）."""
+        lo, hi = value & 0xFF, (value >> 8) & 0xFF
+        data[offset], data[offset + 1] = (lo, hi) if little else (hi, lo)
 
     @staticmethod
-    def _get_u16(data, offset):
-        """小端读出 16bit."""
-        return data[offset] | (data[offset + 1] << 8)
+    def _get_u16(data, offset, little=True):
+        """读出 16bit（little=True 小端 / False 大端）."""
+        b0, b1 = data[offset], data[offset + 1]
+        return (b0 | (b1 << 8)) if little else ((b0 << 8) | b1)

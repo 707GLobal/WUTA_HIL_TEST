@@ -49,6 +49,8 @@ WUTA_HIL_TEST/
 | L3 | 低速动态安全闭环：AMI 选直线加速（2）→ **门控** → **RES 按 GO（0x1E4 0x13）** → EXPLORE → **低速驱动（轮子动）**（通电层） | can0 + VCU + 台架架起 | **是**       |
 | L4 | 车检任务全链路：AMI 直选车检 → 门控 → RES 按 GO → 车检（正弦转向 + 27s 完成链）（通电层） | can0 + 台架    | **是**       |
 
+> **协议变更记录 · 0x210 字节序（2026-10-06）**：`Signal1`（纵向）/`Signal2`（横向）由**小端**改为**大端（Motorola，高字节在前）**——`can_interface.cpp packControlFrame()` 先发高字节，`hil_test/config/protocol.yaml` 的 `tx_210.signals.*.little_endian: false` 是解码侧的同一开关（`protocol_loader` 按它读写，L1 post 的 0x210 透传用例拿总线真实字节交叉核对，两边不一致即失败）。例：纵向 +16% 驱动 `38009=0x9479` → 总线字节 `94 79`；横向回正 `32767=0x7FFF` → `7F FF`。**绘图**：`plot_motor_image.py` 默认按大端解，2026-10-06 20:0x 之前的旧日志要加 `--210-byte-order little`。
+
 ## 环境变量
 
 | 变量                                    | 默认值               | 作用                                        |
@@ -58,6 +60,7 @@ WUTA_HIL_TEST/
 | `HIL_CONFIG`                          | 无                 | 配置目录（脚本自动设置；直接跑 pytest 时手动设）              |
 | `HIL_MM_PARAMS` / `HIL_MM_HIL_PARAMS` | 无                 | L2/L4 用例自管 mission\_manager 的参数文件（脚本自动导出） |
 | `HIL_CTRL_PARAMS`                     | 无                 | L4 从 `controller.yaml` 推导车检期望值（幅值/周期/纵向限幅；脚本自动导出） |
+| `HIL_POST_FINISH_HOLD_SEC`            | 读 `hil_test.yaml`（30） | L4 车检到 FINISH 后、下 FSD 之前的保持时长（s），覆盖 `bench.post_finish_hold_sec`；`0`=不保持 |
 
 各层级自动启动的节点：
 
@@ -191,7 +194,7 @@ cd hil_test && ./scripts/hil_test.sh -l L1 -i can0 --no-build
 
 **如何检验**：
 
-- pre 预期 `14 passed`：协议单测（`test_scale_center / test_little_endian / test_clamp_out_of_range / test_lateral_scaling / test_decode_501 / test_decode_301 / test_decode_1e4` 等）验证 纵向 0 控制→32767 中心点与钳位 \[0, 65535]、**横向 Signal2 正式协议（0\~65535、中心 32767；0=满左、65535=满右）**、小端字节序、0x501 模式字节解析、0x301 心跳配置（ID/DLC=1/20Hz/取值）、0x1E4 RES 状态字节解析与映射（`0x11 online / 0x13 start / 0x10 estop`，DLC=3）；仿真用例 `test_sim_501_event`（模式变化后 0x501 到达且 Byte1 正确，事件驱动不判周期）与 `test_sim_1e4_res_broadcast`（RES 周期电平广播 + 发车脉冲后回落）；
+- pre 预期 `14 passed`：协议单测（`test_scale_center / test_big_endian / test_clamp_out_of_range / test_lateral_scaling / test_decode_501 / test_decode_301 / test_decode_1e4` 等）验证 纵向 0 控制→32767 中心点与钳位 \[0, 65535]、**横向 Signal2 正式协议（0\~65535、中心 32767；0=满左、65535=满右）**、**0x210 Signal1/2 大端字节序（`protocol.yaml` 的 `signals.*.little_endian: false`）**、0x501 模式字节解析、0x301 心跳配置（ID/DLC=1/20Hz/取值）、0x1E4 RES 状态字节解析与映射（`0x11 online / 0x13 start / 0x10 estop`，DLC=3）；仿真用例 `test_sim_501_event`（模式变化后 0x501 到达且 Byte1 正确，事件驱动不判周期）与 `test_sim_1e4_res_broadcast`（RES 周期电平广播 + 发车脉冲后回落）；
 - post 预期 `10 passed`（vcan0）；真实接口下部分用例自动跳过，`N skipped` 属正常——链路：`test_link_can_interface_up` 接口 up、`test_link_301_heartbeat_offline_before_inspection` 验证 0x301 **启动即发**（不受 0x210 门控；DLC=1、首份自检结论前 Data[0]=0x00）、`test_link_210_gate_until_inspection` 验证**发送门控**（首份自检结论前总线上无 0x210，注入 `ok=true` 后开闸、首帧 Signal3=1；**须最先跑**，can_interface 每进程只开一次闸）、`test_link_210_heartbeat` 验证 0x210 保活周期 100ms±20%（开闸后 10Hz；0x501 事件驱动，不判周期）、`test_link_301_heartbeat_online` 验证 0x301 20Hz（50ms±20%）、DLC=1、Data[0] 随自检结论翻转；协议集成：`test_501_mode_mapping`（Byte1=2/3/4/5/6 → 对应模式话题）、`test_501_mode1_ignored`（Byte1=1 不改动）、`test_210_scaling_from_command`（注入 `/control/command` → 0x210 帧定标一致）、`test_1e4_start_mapping`（注入 0x13 → `/system/start_command=True`）、`test_1e4_estop_mapping`（注入 0x10 → `/system/emergency=True`，**必须最后跑**：急停锁存不复位）。
 
 **失败排查**：
@@ -299,7 +302,7 @@ cd hil_test && ./scripts/hil_test.sh -l L3 -i can0 -n --no-build # 台架（-n=H
 
 > 两用例按文件顺序执行：先 AMI 选直线加速 + RES GO 进 EXPLORE，再验证低速驱动（轮子动）。GO 的判据是**纯总线**的（本机 0x1E4 Byte1=0x13），不经 FSD 转述——「人按没按 GO」因此不会被 FSD 侧故障伪装。
 >
-> 人工等待超时可调：`hil_test/config/hil_test.yaml` 的 `bench.res_go_timeout_sec`（**RES 发车**等待，默认 60s，L3/L4 共用；AMI 选模式的 30s 目前写在用例里）。
+> 人工等待超时可调：`hil_test/config/hil_test.yaml` 的 `bench.res_go_timeout_sec`（**RES 发车**等待，当前 **600s＝10min**（调试期放宽；代码里的兜底默认仍是 60s），L3/L4 共用；AMI 选模式的 30s 目前写在用例里）。
 
 真实台架预期 `2 passed`。
 
@@ -309,6 +312,7 @@ cd hil_test && ./scripts/hil_test.sh -l L3 -i can0 -n --no-build # 台架（-n=H
 - 报 `未在本机总线上看到 RES 发车信号（0x1E4 Byte1=0x13）`：RES 遥控器未上线 / 按钮没按到，或 0x1E4 没进总线（`candump can0 | grep 1E4` 应见 33Hz 帧，Byte1 平时为 `0x11`）；
 - 报 `未按 RES GO 就进了 EXPLORE`：检查 `mission_manager` 的 `start_requested_ && mode_selected_` 门控是否生效；
 - 没进 READY / 一直 EMERGENCY：确认 mission\_manager 已加载 HIL 覆盖（被传感器自检锁死时参见 L2），并确认实例是本次新起的；
+- **报 `未进入 READY（需 mission_manager 运行…）`**（2026-10-06 台架连续 4 次踩到）：多半是**上一次运行残留的 mission\_manager** 没被收走。用例自起的实例不在脚本的 NODE_PIDS 里，运行被 Ctrl-C / 硬中断时脚本 trap 管不到它；残留实例会让「等 mission\_manager 出现在 ROS 图上」立刻通过（早于新实例建好订阅）→ 就绪信号被丢弃、新实例停在 IDLE，同时它自己还在 10Hz 广播旧状态（如 EMERGENCY=7）。现在**脚本启动前/退出时**与**用例启动实例前**都会自动清一遍（打印 `==> 清理残留节点 …` / `警告: 发现残留 mission_manager …`）；手动排查：`python3 scripts/kill_stale_nodes.py -n`（只列）或 `python3 scripts/kill_stale_nodes.py`（清理）。
 - `test_low_speed_follow` 报 `0x210 纵向始终为 0x7FFF` 或 `偏离驱动期望区间`：确认 controller 已随脚本启动（`logs/latest/L3/controller_node.log` 应有 `cmd(... vel=...)` 输出）、`bench.target_speed_mps > 0`；若报的是「制动方向」，说明纵向开度符号反了（检查 PID 误差方向与 `scaleControl` 的驱动/制动定义）。
 
 **前提与安全**：**L1/L2 全部通过后再接入真实 VCU**；台架必须架起通电、清场并专人守 RES 急停（VCU 侧硬件）；AMI 模式须选对。
@@ -343,9 +347,11 @@ cd hil_test && ./scripts/hil_test.sh -l L4 -i can0 -n --no-build # 台架（-n=H
 
 **测试流程与人工操作时序**：**人工操作只有一轮「AMI 选车检模式（6）+ 按 RES 发车按钮」**——终端先打印 `[L4] 请操作: AMI 选车检模式（6）…` 与 `[L4] 请操作: 按 RES 发车按钮`（AMI 选模式 30s、RES 发车 60s 超时，等待中每 5s 打印一行剩余时间），按完后自动跑完整个 27s 演示，中途不再需要任何操作。
 
+**完成后的保持（不立刻下 FSD）**：进 FINISH 后**不马上收尾**，终端打印 `[L4] 车检已完成：保持 FSD 在线 30s 后再下 FSD`，每 5s 一行 `…保持中，剩 Ns`；保持期间 can\_interface / controller / 用例自管的 mission\_manager 全部在线（0x210 保活与 0x301 心跳照常），30s 到点才 teardown 下 FSD。时长取 `hil_test.yaml` 的 `bench.post_finish_hold_sec`（默认 **30.0**），现场想缩短/延长可用 `HIL_POST_FINISH_HOLD_SEC=<秒>` 临时覆盖（`0`=不保持、立刻收尾）。**只在真的跑到 FINISH 时保持**：没进 FINISH（任务没完成/中途失败）按原样立即收尾，不空等 30s。
+
 | 用例                     | 需要你做什么                          | 预期结果                                                                                                                                                                                                                                                   |
 | ---------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `test_inspection_full` | 一轮 **AMI 选车检模式（6）+ 按 RES 发车按钮** | ① **入口**：门控 2s 不进 INSPECTION → 本机解析到 0x1E4 Byte1=0x13 → INSPECTION(2)（若门控窗内已出现 GO 帧，视为操作员提前按下，不判门控失效）；② **动作**（0x210 帧快照判）：正弦幅值 ≈ `inspection_steer_amp`/25°×跨度（左 32762/右 32773）（5.77° → 7563，即方向盘 ±30°）±10%、周期 = `inspection_steer_period`（9.0s）±10%、回中帧 <2%（波形干净）、纵向**持续为驱动方向（>32767）且恒为 `inspection_throttle` 定标值**（0.16 → 38009，±2 raw；零输出/制动判失败）；③ **完成**：25~30s 进 FINISH(6) + 0x210 Byte6 finished=1 + 纵向/横向回零 + **回中无跳变**（横向单帧变化 ≤ 正弦幅值的 25%，当前 ≈1.44°） |
+| `test_inspection_full` | 一轮 **AMI 选车检模式（6）+ 按 RES 发车按钮** | ① **入口**：门控 2s 不进 INSPECTION → 本机解析到 0x1E4 Byte1=0x13 → INSPECTION(2)（若门控窗内已出现 GO 帧，视为操作员提前按下，不判门控失效）；② **动作**（0x210 帧快照判）：正弦幅值 ≈ `inspection_steer_amp`/25°×跨度（左 32762/右 32773）（5.77° → 7563，即方向盘 ±30°）±10%、周期 = `inspection_steer_period`（9.0s）±10%、回中帧 <2%（波形干净）、纵向**持续为驱动方向（>32767）且恒为 `inspection_throttle` 定标值**（0.16 → 38009，±2 raw；零输出/制动判失败）；③ **完成**：25~30s 进 FINISH(6) + 0x210 Byte6 finished=1 + 纵向/横向回零 + **回中无跳变**（横向单帧变化 ≤ 正弦幅值的 25%，当前 ≈1.44°）；④ **保持**：完成后 FSD 在线 30s 再下（见上一段），随后才打印结果退出 |
 
 三组判据在跑完后一次性汇总上报（一条 `assert` 列出全部不符项），不会在第一条断言上中断、把后面的证据丢掉。
 
@@ -353,6 +359,10 @@ cd hil_test && ./scripts/hil_test.sh -l L4 -i can0 -n --no-build # 台架（-n=H
 
 **失败排查**：
 
+- **报 `未进入 READY（需 mission_manager 运行；就绪信号已按 0.2s 重发 15s）`**（2026-10-06 20:21~20:24 台架连续 4 次）：两种原因，现在都已自动兜住——
+  ① **上一次运行残留的 mission\_manager**（用例自管实例不在脚本 NODE_PIDS 里，运行被 Ctrl-C/硬中断时脚本 trap 收不到）：残留实例会让「等节点出现在 ROS 图上」提前通过、并持续广播旧状态（EMERGENCY=7），表现为 `/system/mission_state` 上 0/7 交替永远等不到 1。启动前用例与脚本都会自动清理（终端有 `警告: 发现残留 mission_manager …` / `==> 清理残留节点 …`），手动查：`python3 scripts/kill_stale_nodes.py -n`；
+  ② **就绪信号发送早于新实例订阅匹配**：`/system/lidar_ready`、`/system/localization_ready` 是 volatile，一次性注入会被丢弃。用例已改为每 0.2s 重发直到 READY（对正常情况无副作用）；
+  下面几条仍按原顺序排查：
 - 报 `本机未在 0x501 上解析到 Byte1=6（车检）`：说明 30s 内没在 AMI 上选到车检模式（或选成了其它模式）——按终端提示重新选 6；
 - 报 `未在本机总线上看到 RES 发车信号（0x1E4 Byte1=0x13）`：选了模式但没按（或没按到）发车按钮；`candump can0 | grep 1E4` 平时应见 Byte1=`0x11`，按下瞬间出现 `0x13`；
 - 报 `未按 RES GO 就进了 INSPECTION`：检查 mission\_manager 门控（选模式不得启动）；

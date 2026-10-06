@@ -243,6 +243,17 @@ class RosInjector:
         entry = self._latest.get(topic)
         return None if entry is None else entry[1]
 
+    def latest_since(self, topic, t0):
+        """t0（time.time()）之后收到的话题值；没收到返回 None.
+
+        用于「只认本实例的消息」：mission_manager 由用例自起，只判 latest() 可能拿到
+        上一个实例（或本次启动前）留下的值；带时间戳才说明是启动之后新到的广播。
+        """
+        entry = self._latest.get(topic)
+        if entry is None or entry[0] < t0:
+            return None
+        return entry[1]
+
     def latest_state_mode(self):
         """最近 /system/mission_state 的 (state, mission_mode)；未收到返回 (None, None)."""
         return (self.latest('/system/mission_state'),
